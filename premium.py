@@ -27,7 +27,7 @@ parser.add_argument(
 parser.add_argument(
     "--blocks_to_swap",
     type=int,
-    default=12,
+    default=0,
     help="Number of transformer blocks to swap to CPU memory during generation (0 = disabled)"
 )
 # Add test arguments for automatic testing
@@ -94,10 +94,13 @@ def generate_video(
 
         # Lazy load OviFusionEngine on first generation
         if ovi_engine is None:
-            # Use CLI args if provided, otherwise use Gradio parameters
-            final_blocks_to_swap = getattr(args, 'blocks_to_swap', blocks_to_swap) if getattr(args, 'blocks_to_swap', 0) > 0 else blocks_to_swap
-            # Pass None to allow auto-enable logic in OviFusionEngine when block swap is used
-            final_cpu_offload = None if (not cpu_offload and not use_image_gen) else (cpu_offload or use_image_gen)
+            # Use CLI args only in test mode, otherwise use GUI parameters
+            if getattr(args, 'test', False):
+                final_blocks_to_swap = getattr(args, 'blocks_to_swap', 0)
+                final_cpu_offload = getattr(args, 'test_cpu_offload', False)
+            else:
+                final_blocks_to_swap = blocks_to_swap
+                final_cpu_offload = None if (not cpu_offload and not use_image_gen) else (cpu_offload or use_image_gen)
 
             print("=" * 80)
             print("INITIALIZING OVI FUSION ENGINE")
@@ -604,8 +607,13 @@ def process_batch_generation(
 
         # Lazy load OviFusionEngine on first generation
         if ovi_engine is None:
-            final_blocks_to_swap = getattr(args, 'blocks_to_swap', blocks_to_swap) if getattr(args, 'blocks_to_swap', 0) > 0 else blocks_to_swap
-            final_cpu_offload = cpu_offload
+            # Use CLI args only in test mode, otherwise use GUI parameters
+            if getattr(args, 'test', False):
+                final_blocks_to_swap = getattr(args, 'blocks_to_swap', 0)
+                final_cpu_offload = getattr(args, 'test_cpu_offload', False)
+            else:
+                final_blocks_to_swap = blocks_to_swap
+                final_cpu_offload = cpu_offload
 
             print("=" * 80)
             print("INITIALIZING OVI FUSION ENGINE FOR BATCH PROCESSING")
