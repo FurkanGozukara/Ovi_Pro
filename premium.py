@@ -2,7 +2,11 @@ import gradio as gr
 import torch
 import argparse
 import os
+import sys
 from datetime import datetime
+
+print(f"[DEBUG] Starting premium.py with args: {sys.argv}")
+
 from ovi.ovi_fusion_engine import OviFusionEngine, DEFAULT_CONFIG
 from ovi.utils.io_utils import save_video
 from ovi.utils.processing_utils import clean_text, scale_hw_to_area_divisible
@@ -57,13 +61,92 @@ parser.add_argument(
     action="store_true",
     help="Enable CPU-only T5 in test mode"
 )
+parser.add_argument(
+    "--single-generation",
+    type=str,
+    help="Internal: Run single generation from JSON params and exit"
+)
+parser.add_argument(
+    "--single-generation-file",
+    type=str,
+    help="Internal: Run single generation from JSON file and exit"
+)
+parser.add_argument(
+    "--test-subprocess",
+    action="store_true",
+    help="Internal: Test subprocess functionality"
+)
 args = parser.parse_args()
+
+print(f"[DEBUG] Parsed args: single_generation={bool(args.single_generation)}, single_generation_file={bool(args.single_generation_file)}, test={bool(getattr(args, 'test', False))}, test_subprocess={bool(getattr(args, 'test_subprocess', False))}")
 
 # Initialize engines with lazy loading (no models loaded yet)
 ovi_engine = None  # Will be initialized on first generation
 
 # Global cancellation flag for stopping generations
 cancel_generation = False
+
+def run_generation_subprocess(params):
+    """Run a single generation in a subprocess to ensure memory cleanup."""
+    import subprocess
+    import sys
+    import json
+    import os
+    import tempfile
+
+    try:
+        # Get the current script path and venv
+        script_path = os.path.abspath(__file__)
+        script_dir = os.path.dirname(script_path)
+        venv_path = os.path.join(script_dir, "venv")
+
+        # Use venv python executable directly
+        if sys.platform == "win32":
+            python_exe = os.path.join(venv_path, "Scripts", "python.exe")
+        else:
+            python_exe = os.path.join(venv_path, "bin", "python")
+
+        # Check if venv python exists, fallback to system python
+        if not os.path.exists(python_exe):
+            print(f"[SUBPROCESS] Venv python not found at {python_exe}, using system python")
+            python_exe = sys.executable
+
+        # Write params to temporary file to avoid command line issues
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, dir=script_dir) as f:
+            json.dump(params, f)
+            temp_file = f.name
+
+        # Prepare command arguments - pass temp file path
+        cmd_args = [
+            python_exe,
+            script_path,
+            "--single-generation-file",
+            temp_file
+        ]
+
+        print(f"[SUBPROCESS] Running generation in subprocess...")
+        print(f"[SUBPROCESS] Command: {' '.join(cmd_args)}")
+        print(f"[SUBPROCESS] Params file: {temp_file}")
+
+        # Run the subprocess directly
+        result = subprocess.run(cmd_args, cwd=script_dir)
+
+        # Clean up temp file
+        try:
+            os.unlink(temp_file)
+        except:
+            pass
+
+        if result.returncode == 0:
+            print("[SUBPROCESS] Generation completed successfully")
+            return True
+        else:
+            print(f"[SUBPROCESS] Generation failed with return code: {result.returncode}")
+            return False
+
+    except Exception as e:
+        print(f"[SUBPROCESS] Error running subprocess: {e}")
+        return False
 
 share_enabled = args.share
 print(f"Starting Gradio interface with lazy loading... Share mode: {'ENABLED' if share_enabled else 'DISABLED (local only)'}")
@@ -97,15 +180,27 @@ def generate_video(
     randomize_seed,
     save_metadata,
     aspect_ratio,
+    clear_all,
 ):
     global ovi_engine
+
+    print(f"[GENERATE_VIDEO] Called with clear_all={clear_all}, num_generations={num_generations}")
 
     try:
         # Check for cancellation at the start
         check_cancellation()
 
-        # Lazy load OviFusionEngine on first generation
-        if ovi_engine is None:
+        # Only initialize engine if we're not using subprocess mode (clear_all=False)
+        # When clear_all=True, all generations run in subprocesses, so main process doesn't need models
+        if clear_all:
+            print("=" * 80)
+            print("CLEAR ALL MEMORY ENABLED")
+            print("  Main process will NOT load any models")
+            print("  All generations will run in separate subprocesses")
+            print("  VRAM/RAM will be completely cleared between generations")
+            print("=" * 80)
+
+        if not clear_all and ovi_engine is None:
             # Use CLI args only in test mode, otherwise use GUI parameters
             if getattr(args, 'test', False):
                 final_blocks_to_swap = getattr(args, 'blocks_to_swap', 0)
@@ -115,16 +210,12 @@ def generate_video(
                 final_cpu_offload = None if (not cpu_offload and not use_image_gen) else (cpu_offload or use_image_gen)
 
             print("=" * 80)
-            print("INITIALIZING OVI FUSION ENGINE")
+            print("INITIALIZING OVI FUSION ENGINE IN MAIN PROCESS")
             print(f"  Block Swap: {final_blocks_to_swap} blocks (0 = disabled)")
             print(f"  CPU Offload: {final_cpu_offload}")
             print(f"  Image Generation: {use_image_gen}")
             print(f"  No Block Prep: {no_block_prep}")
-
-            if final_blocks_to_swap > 0:
-                print(f"\n  [OK] Block swapping enabled: {final_blocks_to_swap} transformer blocks will stay on CPU")
-                print(f"  [OK] CPU offload auto-enabled for optimal memory management")
-                print(f"  [OK] Expected VRAM savings: ~{final_blocks_to_swap * 0.5:.1f} GB")
+            print(f"  Note: Models will be loaded in main process (Clear All Memory disabled)")
             print("=" * 80)
 
             DEFAULT_CONFIG['cpu_offload'] = final_cpu_offload
@@ -160,6 +251,56 @@ def generate_video(
 
             print(f"\n[GENERATION {gen_idx + 1}/{int(num_generations)}] Starting with seed: {current_seed}")
 
+            if clear_all:
+                # Run this generation in a subprocess for memory cleanup
+                single_gen_params = {
+                    'text_prompt': text_prompt,
+                    'image': image_path,
+                    'video_frame_height': video_frame_height,
+                    'video_frame_width': video_frame_width,
+                    'video_seed': current_seed,
+                    'solver_name': solver_name,
+                    'sample_steps': sample_steps,
+                    'shift': shift,
+                    'video_guidance_scale': video_guidance_scale,
+                    'audio_guidance_scale': audio_guidance_scale,
+                    'slg_layer': slg_layer,
+                    'blocks_to_swap': blocks_to_swap,
+                    'video_negative_prompt': video_negative_prompt,
+                    'audio_negative_prompt': audio_negative_prompt,
+                    'use_image_gen': False,  # Not used in single gen mode
+                    'cpu_offload': cpu_offload,
+                    'delete_text_encoder': delete_text_encoder,
+                    'fp8_t5': fp8_t5,
+                    'cpu_only_t5': cpu_only_t5,
+                    'no_audio': no_audio,
+                    'no_block_prep': no_block_prep,
+                    'num_generations': 1,  # Always 1 for subprocess
+                    'randomize_seed': False,  # Seed handled above
+                    'save_metadata': save_metadata,
+                    'aspect_ratio': aspect_ratio,
+                    'clear_all': False,  # Disable subprocess in subprocess
+                }
+
+                success = run_generation_subprocess(single_gen_params)
+                if not success:
+                    print(f"[GENERATION {gen_idx + 1}/{int(num_generations)}] Failed in subprocess")
+                    continue
+
+                # Find the generated file (should be the most recent in outputs)
+                outputs_dir = args.output_dir if args.output_dir else os.path.join(os.path.dirname(__file__), "outputs")
+                import glob
+                pattern = os.path.join(outputs_dir, "ovi_generation_*.mp4")
+                existing_files = glob.glob(pattern)
+                if existing_files:
+                    last_output_path = max(existing_files, key=os.path.getctime)
+                    print(f"[GENERATION {gen_idx + 1}/{int(num_generations)}] Completed: {os.path.basename(last_output_path)}")
+                    continue
+                else:
+                    print(f"[GENERATION {gen_idx + 1}/{int(num_generations)}] No output file found")
+                    continue
+
+            # Original generation logic (when clear_all is disabled)
             generated_video, generated_audio, _ = ovi_engine.generate(
                 text_prompt=text_prompt,
                 image_path=image_path,
@@ -355,7 +496,7 @@ def save_preset(preset_name, current_preset,
                 shift, video_guidance_scale, audio_guidance_scale, slg_layer,
                 blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
                 video_negative_prompt, audio_negative_prompt,
-                batch_input_folder, batch_output_folder, batch_skip_existing):
+                batch_input_folder, batch_output_folder, batch_skip_existing, clear_all):
     """Save current UI state as a preset."""
     try:
         presets_dir = get_presets_dir()
@@ -398,6 +539,7 @@ def save_preset(preset_name, current_preset,
             "batch_input_folder": batch_input_folder,
             "batch_output_folder": batch_output_folder,
             "batch_skip_existing": batch_skip_existing,
+            "clear_all": clear_all,
             "saved_at": datetime.now().isoformat()
         }
 
@@ -470,12 +612,13 @@ def load_preset(preset_name):
             gr.update(value=preset_data.get("batch_input_folder", "")),
             gr.update(value=preset_data.get("batch_output_folder", "")),
             gr.update(value=preset_data.get("batch_skip_existing", True)),
+            gr.update(value=preset_data.get("clear_all", True)),
             gr.update(value=preset_name),  # Update dropdown value
             f"Preset '{preset_name}' loaded successfully!"
         )
 
     except Exception as e:
-        return [gr.update() for _ in range(27)] + [f"Error loading preset: {e}"]
+        return [gr.update() for _ in range(28)] + [f"Error loading preset: {e}"]
 
 def initialize_app_with_auto_load():
     """Initialize app with preset dropdown choices and auto-load last preset."""
@@ -501,12 +644,12 @@ def initialize_app_with_auto_load():
                 print(f"Last used preset '{last_preset}' not found, starting with empty selection")
 
         # No preset to auto-load, just return initialized dropdown
-        return gr.update(choices=presets, value=None), *[gr.update() for _ in range(27)], ""
+        return gr.update(choices=presets, value=None), *[gr.update() for _ in range(28)], ""
 
     except Exception as e:
         print(f"Warning: Could not initialize app with auto-load: {e}")
         presets = get_available_presets()
-        return gr.update(choices=presets, value=None), *[gr.update() for _ in range(27)], ""
+        return gr.update(choices=presets, value=None), *[gr.update() for _ in range(28)], ""
 
 def initialize_app():
     """Initialize app with preset dropdown choices."""
@@ -626,6 +769,7 @@ def process_batch_generation(
     randomize_seed,
     save_metadata,
     aspect_ratio,
+    clear_all,
 ):
     """Process batch generation from input folder."""
     global ovi_engine
@@ -653,8 +797,17 @@ def process_batch_generation(
             img_status = "with image" if img_path else "text-only"
             print(f"  - {base_name}: {img_status}")
 
-        # Lazy load OviFusionEngine on first generation
-        if ovi_engine is None:
+        # Only initialize engine if we're not using subprocess mode (clear_all=False)
+        # When clear_all=True, all batch generations run in subprocesses, so main process doesn't need models
+        if clear_all:
+            print("=" * 80)
+            print("CLEAR ALL MEMORY ENABLED FOR BATCH PROCESSING")
+            print("  Main process will NOT load any models")
+            print("  All batch generations will run in separate subprocesses")
+            print("  VRAM/RAM will be completely cleared between each batch item")
+            print("=" * 80)
+
+        if not clear_all and ovi_engine is None:
             # Use CLI args only in test mode, otherwise use GUI parameters
             if getattr(args, 'test', False):
                 final_blocks_to_swap = getattr(args, 'blocks_to_swap', 0)
@@ -664,15 +817,11 @@ def process_batch_generation(
                 final_cpu_offload = cpu_offload
 
             print("=" * 80)
-            print("INITIALIZING OVI FUSION ENGINE FOR BATCH PROCESSING")
+            print("INITIALIZING OVI FUSION ENGINE FOR BATCH PROCESSING IN MAIN PROCESS")
             print(f"  Block Swap: {final_blocks_to_swap} blocks (0 = disabled)")
             print(f"  CPU Offload: {final_cpu_offload}")
             print(f"  No Block Prep: {no_block_prep}")
-
-            if final_blocks_to_swap > 0:
-                print(f"\n  [OK] Block swapping enabled: {final_blocks_to_swap} transformer blocks will stay on CPU")
-                print(f"  [OK] CPU offload auto-enabled for optimal memory management")
-                print(f"  [OK] Expected VRAM savings: ~{final_blocks_to_swap * 0.5:.1f} GB")
+            print(f"  Note: Models will be loaded in main process (Clear All Memory disabled)")
             print("=" * 80)
 
             DEFAULT_CONFIG['cpu_offload'] = final_cpu_offload
@@ -725,6 +874,54 @@ def process_batch_generation(
 
                 print(f"  [GENERATION {gen_idx + 1}/{int(num_generations)}] Seed: {current_seed}")
 
+                if clear_all:
+                    # Run this batch generation in a subprocess for memory cleanup
+                    single_gen_params = {
+                        'text_prompt': text_prompt,
+                        'image': image_path,
+                        'video_frame_height': video_frame_height,
+                        'video_frame_width': video_frame_width,
+                        'video_seed': current_seed,
+                        'solver_name': solver_name,
+                        'sample_steps': sample_steps,
+                        'shift': shift,
+                        'video_guidance_scale': video_guidance_scale,
+                        'audio_guidance_scale': audio_guidance_scale,
+                        'slg_layer': slg_layer,
+                        'blocks_to_swap': blocks_to_swap,
+                        'video_negative_prompt': video_negative_prompt,
+                        'audio_negative_prompt': audio_negative_prompt,
+                        'use_image_gen': False,
+                        'cpu_offload': cpu_offload,
+                        'delete_text_encoder': delete_text_encoder,
+                        'fp8_t5': fp8_t5,
+                        'cpu_only_t5': cpu_only_t5,
+                        'no_audio': no_audio,
+                        'no_block_prep': no_block_prep,
+                        'num_generations': 1,
+                        'randomize_seed': False,
+                        'save_metadata': save_metadata,
+                        'aspect_ratio': aspect_ratio,
+                        'clear_all': False,  # Disable subprocess in subprocess
+                    }
+
+                    success = run_generation_subprocess(single_gen_params)
+                    if success:
+                        # Find the generated file with base_name prefix
+                        import glob
+                        pattern = os.path.join(outputs_dir, f"{base_name}_*.mp4")
+                        existing_files = glob.glob(pattern)
+                        if existing_files:
+                            last_output_path = max(existing_files, key=os.path.getctime)
+                            print(f"    [SUCCESS] Saved: {os.path.basename(last_output_path)}")
+                            processed_count += 1
+                        else:
+                            print(f"    [WARNING] No output file found for {base_name}")
+                    else:
+                        print(f"    [ERROR] Generation failed in subprocess")
+                    continue
+
+                # Original batch generation logic (when clear_all is disabled)
                 try:
                     generated_video, generated_audio, _ = ovi_engine.generate(
                         text_prompt=text_prompt,
@@ -1013,7 +1210,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                                 info="Skip Layer Guidance layer - affects audio-video synchronization"
                             )
 
-                        # Block Swap and CPU Offload
+                        # Block Swap, CPU Offload, and Clear All
                         with gr.Row():
                             blocks_to_swap = gr.Slider(
                                 minimum=0,
@@ -1027,6 +1224,11 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                                 label="CPU Offload",
                                 value=True,
                                 info="Offload models to CPU between operations to save VRAM"
+                            )
+                            clear_all = gr.Checkbox(
+                                label="Clear All Memory",
+                                value=True,
+                                info="Run each generation as separate process to clear VRAM/RAM (recommended)"
                             )
                         
                         # T5 Text Encoder Options (all in one row)
@@ -1190,6 +1392,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                         - **SLG Layer**: Audio-video sync (-1 to disable, 11 recommended)
                         - **Block Swap**: CPU blocks for VRAM savings
                         - **CPU Offload**: Offload models between operations
+                        - **Clear All Memory**: Run each generation as separate process to prevent VRAM/RAM leaks (recommended)
 
                         ## 💡 Tips for Best Results
 
@@ -1219,10 +1422,16 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                         ## 🔧 Troubleshooting
 
                         ### Memory Issues
+                        - ✅ Enable "Clear All Memory" checkbox (prevents VRAM/RAM leaks between generations)
                         - ✅ Enable "CPU Offload" checkbox
                         - ✅ Increase "Block Swap" value (12+ recommended)
                         - ✅ Reduce resolution or sample steps
                         - ✅ Close other GPU applications
+
+                        ### Memory Leak Prevention
+                        - **Why Clear All Memory is important**: Each generation loads large AI models into VRAM/RAM. Without clearing, residual memory from previous generations can accumulate, causing slowdowns or crashes over time.
+                        - **How it works**: When enabled, each generation runs in a separate Python process. When the process exits, all memory is automatically freed by the operating system.
+                        - **Performance impact**: Minimal - subprocess startup is fast, and memory cleanup ensures consistent performance across multiple generations.
 
                         ### Quality Issues
                         - 🔄 Try different random seeds
@@ -1375,9 +1584,9 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             video_text_prompt, image_to_use, video_height, video_width, video_seed, solver_name,
             sample_steps, shift, video_guidance_scale, audio_guidance_scale,
             slg_layer, blocks_to_swap, video_negative_prompt, audio_negative_prompt,
-            gr.Checkbox(value=False, visible=False), cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, 
+            gr.Checkbox(value=False, visible=False), cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
             no_audio, gr.Checkbox(value=False, visible=False),
-            num_generations, randomize_seed, save_metadata, aspect_ratio,
+            num_generations, randomize_seed, save_metadata, aspect_ratio, clear_all,
         ],
         outputs=[output_path],
     )
@@ -1417,7 +1626,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             video_guidance_scale, audio_guidance_scale, slg_layer, blocks_to_swap,
             video_negative_prompt, audio_negative_prompt, cpu_offload,
             delete_text_encoder, fp8_t5, cpu_only_t5, no_audio, gr.Checkbox(value=False, visible=False),
-            num_generations, randomize_seed, save_metadata, aspect_ratio,
+            num_generations, randomize_seed, save_metadata, aspect_ratio, clear_all,
         ],
         outputs=[output_path],
     )
@@ -1433,7 +1642,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             shift, video_guidance_scale, audio_guidance_scale, slg_layer,
             blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
             video_negative_prompt, audio_negative_prompt,
-            batch_input_folder, batch_output_folder, batch_skip_existing,
+            batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
         ],
         outputs=[
             preset_dropdown, preset_name,  # Update dropdown, clear name field
@@ -1443,7 +1652,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             shift, video_guidance_scale, audio_guidance_scale, slg_layer,
             blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
             video_negative_prompt, audio_negative_prompt,
-            batch_input_folder, batch_output_folder, batch_skip_existing,
+            batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
             gr.Textbox(visible=False)  # status message
         ],
     )
@@ -1458,7 +1667,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             shift, video_guidance_scale, audio_guidance_scale, slg_layer,
             blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
             video_negative_prompt, audio_negative_prompt,
-            batch_input_folder, batch_output_folder, batch_skip_existing,
+            batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
             preset_dropdown, gr.Textbox(visible=False)  # Update current preset, status message
         ],
     )
@@ -1474,7 +1683,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             shift, video_guidance_scale, audio_guidance_scale, slg_layer,
             blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
             video_negative_prompt, audio_negative_prompt,
-            batch_input_folder, batch_output_folder, batch_skip_existing,
+            batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
             preset_dropdown, gr.Textbox(visible=False)  # Update current preset, status message
         ],
     )
@@ -1503,8 +1712,105 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
         ],
     )
 
+def run_single_generation(json_params):
+    """Run a single generation from JSON parameters and exit."""
+    try:
+        import json
+        params = json.loads(json_params)
+
+        print(f"[SINGLE-GEN] Starting generation with params: {params.keys()}")
+        print(f"[SINGLE-GEN] Text prompt: {params.get('text_prompt', 'N/A')[:50]}...")
+
+        # Run the generation with the provided parameters
+        result = generate_video(**params)
+
+        # Exit with appropriate code
+        if result:
+            print(f"[SINGLE-GEN] Success: {result}")
+            sys.exit(0)
+        else:
+            print("[SINGLE-GEN] Failed - no result returned")
+            sys.exit(1)
+
+    except Exception as e:
+        print(f"[SINGLE-GEN] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+def run_single_generation_from_file(json_file_path):
+    """Run a single generation from JSON file and exit."""
+    try:
+        import json
+        with open(json_file_path, 'r') as f:
+            params = json.load(f)
+
+        print(f"[SINGLE-GEN] Loaded params from file: {json_file_path}")
+        print(f"[SINGLE-GEN] Starting generation with params: {list(params.keys())}")
+        print(f"[SINGLE-GEN] Text prompt: {params.get('text_prompt', 'N/A')[:50]}...")
+
+        # Run the generation with the provided parameters
+        result = generate_video(**params)
+
+        # Exit with appropriate code
+        if result:
+            print(f"[SINGLE-GEN] Success: {result}")
+            sys.exit(0)
+        else:
+            print("[SINGLE-GEN] Failed - no result returned")
+            sys.exit(1)
+
+    except Exception as e:
+        print(f"[SINGLE-GEN] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
 if __name__ == "__main__":
-    if args.test:
+    print(f"[DEBUG] Main block: single_generation_file={args.single_generation_file}, single_generation={args.single_generation}, test={getattr(args, 'test', False)}, test_subprocess={getattr(args, 'test_subprocess', False)}")
+    if args.single_generation_file:
+        print("[DEBUG] Taking single_generation_file path")
+        # Single generation mode from file - run and exit
+        run_single_generation_from_file(args.single_generation_file)
+    elif args.single_generation:
+        print("[DEBUG] Taking single_generation path")
+        # Single generation mode - run and exit
+        run_single_generation(args.single_generation)
+    elif args.test_subprocess:
+        # Test subprocess functionality
+        print("[DEBUG] Testing subprocess functionality")
+        test_params = {
+            'text_prompt': 'test video',
+            'image': None,
+            'video_frame_height': 512,
+            'video_frame_width': 992,
+            'video_seed': 99,
+            'solver_name': 'unipc',
+            'sample_steps': 1,
+            'shift': 5.0,
+            'video_guidance_scale': 4.0,
+            'audio_guidance_scale': 3.0,
+            'slg_layer': 11,
+            'blocks_to_swap': 0,
+            'video_negative_prompt': 'jitter, bad hands, blur, distortion',
+            'audio_negative_prompt': 'robotic, muffled, echo, distorted',
+            'use_image_gen': False,
+            'cpu_offload': True,
+            'delete_text_encoder': True,
+            'fp8_t5': False,
+            'cpu_only_t5': False,
+            'no_audio': False,
+            'no_block_prep': False,
+            'num_generations': 1,
+            'randomize_seed': False,
+            'save_metadata': True,
+            'aspect_ratio': '16:9 Landscape',
+            'clear_all': False,
+        }
+        success = run_generation_subprocess(test_params)
+        print(f"[DEBUG] Subprocess test result: {success}")
+        sys.exit(0 if success else 1)
+    elif args.test:
         # Test mode: activate venv and run generation
         print("=" * 80)
         print("TEST MODE ENABLED - ACTIVATING VENV")
