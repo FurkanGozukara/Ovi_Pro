@@ -637,19 +637,44 @@ class OviFusionEngine:
                     print(f"  Estimated tile size in pixels: {self.vae_tile_size*16}×{self.vae_tile_size*16}")
                     print(f"  Expected VRAM savings: ~30-60% depending on tile size")
                     print("=" * 80)
-                    
-                    generated_video = self.vae_model_video.wrapped_decode_tiled(
-                        video_latents_for_vae,
+
+                    # Calculate total number of tiles for progress tracking
+                    _, _, frames, height, width = video_latents_for_vae.shape
+                    from ovi.utils.tiled_vae_utils import get_tiled_scale_steps
+                    total_tiles = get_tiled_scale_steps(
+                        width=width,
+                        height=height,
                         tile_x=self.vae_tile_size,
                         tile_y=self.vae_tile_size,
-                        tile_t=self.vae_tile_temporal,
-                        overlap_x=self.vae_tile_overlap,
-                        overlap_y=self.vae_tile_overlap,
-                        overlap_t=1
+                        overlap=self.vae_tile_overlap
                     )
+                    # Since we process all frames together, multiply by temporal tiles (usually 1)
+                    total_tiles *= 1  # frames // self.vae_tile_temporal if temporal tiling was used
+
+                    print(f"VAE DECODE PROGRESS: Processing {total_tiles} tiles...")
+
+                    # Create progress bar for VAE decoding
+                    pbar = tqdm(total=total_tiles, desc="VAE Decode", unit="tile", ncols=80)
+
+                    try:
+                        generated_video = self.vae_model_video.wrapped_decode_tiled(
+                            video_latents_for_vae,
+                            tile_x=self.vae_tile_size,
+                            tile_y=self.vae_tile_size,
+                            tile_t=self.vae_tile_temporal,
+                            overlap_x=self.vae_tile_overlap,
+                            overlap_y=self.vae_tile_overlap,
+                            overlap_t=1,
+                            progress_bar=pbar
+                        )
+                    finally:
+                        # Close progress bar
+                        pbar.close()
                 else:
                     # Standard decode (full VRAM usage)
+                    print("VAE DECODE PROGRESS: Decoding video (standard mode)...")
                     generated_video = self.vae_model_video.wrapped_decode(video_latents_for_vae)
+                    print("VAE DECODE PROGRESS: Standard decode completed")
                 
                 # Track VRAM after decode
                 if torch.cuda.is_available():

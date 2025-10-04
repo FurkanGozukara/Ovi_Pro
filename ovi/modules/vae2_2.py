@@ -1091,7 +1091,7 @@ class Wan2_2_VAE:
             logging.info(e)
             return None
     
-    def decode_tiled(self, zs, tile_x=32, tile_y=32, tile_t=31, overlap_x=8, overlap_y=8, overlap_t=1):
+    def decode_tiled(self, zs, tile_x=32, tile_y=32, tile_t=31, overlap_x=8, overlap_y=8, overlap_t=1, progress_bar=None):
         """
         Tiled 3D decode for Wan 2.2 VAE with VRAM optimization.
         
@@ -1116,6 +1116,7 @@ class Wan2_2_VAE:
                        Default: 8 = 128 pixels after upscale
             overlap_t: Temporal overlap (frames)
                        Default: 1 frame
+            progress_bar: Optional tqdm progress bar for tracking decode progress
         
         Returns:
             Decoded video tensor (1, 3, F, H×16, W×16) in range [-1, 1]
@@ -1228,7 +1229,8 @@ class Wan2_2_VAE:
                     overlap=(overlap_t, overlap_x, overlap_y),  # overlap_t=0 prevents temporal tiling
                     upscale_amount=(temporal_upscale, spatial_upscale, spatial_upscale),  # Measured upscales
                     out_channels=3,  # RGB output
-                    output_device=zs.device
+                    output_device=zs.device,
+                    pbar=progress_bar  # Pass progress bar for tracking
                 )
                 
                 logging.info(f"[TILED VAE DECODE] Completed! Output shape: {decoded.shape}")
@@ -1253,13 +1255,13 @@ class Wan2_2_VAE:
             logging.error(traceback.format_exc())
             return None
     
-    def wrapped_decode_tiled(self, zs, tile_x=32, tile_y=32, tile_t=31, overlap_x=8, overlap_y=8, overlap_t=1):
+    def wrapped_decode_tiled(self, zs, tile_x=32, tile_y=32, tile_t=31, overlap_x=8, overlap_y=8, overlap_t=1, progress_bar=None):
         """
         User-facing tiled decode API matching wrapped_decode signature.
-        
+
         This method provides a simple interface for tiled decoding with automatic
         parameter validation and error handling.
-        
+
         Args:
             zs: Latent tensor (1, 48, F, H, W)
             tile_x: Spatial tile width in latent space (default: 32)
@@ -1268,10 +1270,11 @@ class Wan2_2_VAE:
             overlap_x: Horizontal overlap in latent space (default: 8)
             overlap_y: Vertical overlap in latent space (default: 8)
             overlap_t: Temporal overlap in frames (default: 1)
-        
+            progress_bar: Optional tqdm progress bar for tracking decode progress
+
         Returns:
             Decoded video tensor (1, 3, F, H×16, W×16) or None on error
-        
+
         Example:
             >>> vae = Wan2_2_VAE(...)
             >>> latents = torch.randn(1, 48, 31, 32, 62)  # 512×992 video
@@ -1302,13 +1305,14 @@ class Wan2_2_VAE:
             overlap_t = min(overlap_t, tile_t // 2)
             
             return self.decode_tiled(
-                zs, 
-                tile_x=tile_x, 
-                tile_y=tile_y, 
+                zs,
+                tile_x=tile_x,
+                tile_y=tile_y,
                 tile_t=tile_t,
                 overlap_x=overlap_x,
                 overlap_y=overlap_y,
-                overlap_t=overlap_t
+                overlap_t=overlap_t,
+                progress_bar=progress_bar
             )
             
         except Exception as e:
