@@ -390,9 +390,14 @@ def generate_video(
                     'delete_text_encoder': delete_text_encoder,
                     'fp8_t5': fp8_t5,
                     'cpu_only_t5': cpu_only_t5,
+                    'no_audio': no_audio,
+                    'no_block_prep': no_block_prep,
+                    'clear_all': clear_all,
+                    'vae_tiled_decode': vae_tiled_decode,
+                    'vae_tile_size': vae_tile_size,
+                    'vae_tile_overlap': vae_tile_overlap,
                     'video_negative_prompt': video_negative_prompt,
                     'audio_negative_prompt': audio_negative_prompt,
-                    'no_audio': no_audio,
                     'is_batch': False
                 }
                 save_generation_metadata(output_path, generation_params, current_seed)
@@ -796,6 +801,15 @@ MEMORY OPTIMIZATION:
 - Block Swap: {generation_params.get('blocks_to_swap', 'N/A')} blocks
 - CPU Offload: {generation_params.get('cpu_offload', 'N/A')}
 - Delete Text Encoder: {generation_params.get('delete_text_encoder', True)}
+- Scaled FP8 T5: {generation_params.get('fp8_t5', False)}
+- CPU-Only T5: {generation_params.get('cpu_only_t5', False)}
+- No Block Prep: {generation_params.get('no_block_prep', False)}
+- Clear All Memory: {generation_params.get('clear_all', False)}
+
+VAE OPTIMIZATION:
+- Tiled VAE Decode: {generation_params.get('vae_tiled_decode', False)}
+- VAE Tile Size: {generation_params.get('vae_tile_size', 'N/A')}
+- VAE Tile Overlap: {generation_params.get('vae_tile_overlap', 'N/A')}
 
 NEGATIVE PROMPTS:
 - Video: {generation_params.get('video_negative_prompt', 'N/A')}
@@ -1094,9 +1108,14 @@ def process_batch_generation(
                             'delete_text_encoder': delete_text_encoder,
                             'fp8_t5': fp8_t5,
                             'cpu_only_t5': cpu_only_t5,
+                            'no_audio': no_audio,
+                            'no_block_prep': no_block_prep,
+                            'clear_all': clear_all,
+                            'vae_tiled_decode': vae_tiled_decode,
+                            'vae_tile_size': vae_tile_size,
+                            'vae_tile_overlap': vae_tile_overlap,
                             'video_negative_prompt': video_negative_prompt,
                             'audio_negative_prompt': audio_negative_prompt,
-                            'no_audio': no_audio,
                             'is_batch': True
                         }
                         save_generation_metadata(output_path, generation_params, current_seed)
