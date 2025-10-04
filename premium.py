@@ -354,7 +354,8 @@ def save_preset(preset_name, current_preset,
                 solver_name, sample_steps, num_generations,
                 shift, video_guidance_scale, audio_guidance_scale, slg_layer,
                 blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
-                video_negative_prompt, audio_negative_prompt):
+                video_negative_prompt, audio_negative_prompt,
+                batch_input_folder, batch_output_folder, batch_skip_existing):
     """Save current UI state as a preset."""
     try:
         presets_dir = get_presets_dir()
@@ -364,7 +365,8 @@ def save_preset(preset_name, current_preset,
             preset_name = current_preset
 
         if not preset_name.strip():
-            return False, "Please enter a preset name or select a preset to overwrite", get_available_presets()
+            presets = get_available_presets()
+            return gr.update(choices=presets, value=None), gr.update(value=""), *[gr.update() for _ in range(27)], "Please enter a preset name or select a preset to overwrite"
 
         preset_file = os.path.join(presets_dir, f"{preset_name}.json")
 
@@ -393,6 +395,9 @@ def save_preset(preset_name, current_preset,
             "cpu_only_t5": cpu_only_t5,
             "video_negative_prompt": video_negative_prompt,
             "audio_negative_prompt": audio_negative_prompt,
+            "batch_input_folder": batch_input_folder,
+            "batch_output_folder": batch_output_folder,
+            "batch_skip_existing": batch_skip_existing,
             "saved_at": datetime.now().isoformat()
         }
 
@@ -406,22 +411,27 @@ def save_preset(preset_name, current_preset,
         with open(last_used_file, 'w', encoding='utf-8') as f:
             f.write(preset_name)
 
-        return True, f"Preset '{preset_name}' saved successfully!", get_available_presets()
+        presets = get_available_presets()
+        # Load the preset to get all the UI values
+        loaded_values = load_preset(preset_name)
+        # Return dropdown update, name clear, loaded values, success message
+        return gr.update(choices=presets, value=preset_name), gr.update(value=""), *loaded_values[:-1], f"Preset '{preset_name}' saved successfully!"
 
     except Exception as e:
-        return False, f"Error saving preset: {e}", get_available_presets()
+        presets = get_available_presets()
+        return gr.update(choices=presets, value=None), gr.update(value=""), *[gr.update() for _ in range(27)], f"Error saving preset: {e}"
 
 def load_preset(preset_name):
     """Load a preset and return all UI values."""
     try:
         if not preset_name:
-            return [gr.update() for _ in range(21)] + [None, "No preset selected"]
+            return [gr.update() for _ in range(27)] + ["No preset selected"]
 
         presets_dir = get_presets_dir()
         preset_file = os.path.join(presets_dir, f"{preset_name}.json")
 
         if not os.path.exists(preset_file):
-            return [gr.update() for _ in range(21)] + [None, f"Preset '{preset_name}' not found"]
+            return [gr.update() for _ in range(27)] + [f"Preset '{preset_name}' not found"]
 
         with open(preset_file, 'r', encoding='utf-8') as f:
             import json
@@ -457,16 +467,23 @@ def load_preset(preset_name):
             gr.update(value=preset_data.get("cpu_only_t5", False)),
             gr.update(value=preset_data.get("video_negative_prompt", "jitter, bad hands, blur, distortion")),
             gr.update(value=preset_data.get("audio_negative_prompt", "robotic, muffled, echo, distorted")),
-            preset_name,
+            gr.update(value=preset_data.get("batch_input_folder", "")),
+            gr.update(value=preset_data.get("batch_output_folder", "")),
+            gr.update(value=preset_data.get("batch_skip_existing", True)),
+            gr.update(value=preset_name),  # Update dropdown value
             f"Preset '{preset_name}' loaded successfully!"
         )
 
     except Exception as e:
-        return [gr.update() for _ in range(21)] + [None, f"Error loading preset: {e}"]
+        return [gr.update() for _ in range(27)] + [f"Error loading preset: {e}"]
 
-def auto_load_last_preset():
-    """Auto-load the last used preset on startup."""
+def initialize_app_with_auto_load():
+    """Initialize app with preset dropdown choices and auto-load last preset."""
     try:
+        presets = get_available_presets()
+        dropdown_update = gr.update(choices=presets, value=None)
+
+        # Try to auto-load the last used preset
         presets_dir = get_presets_dir()
         last_used_file = os.path.join(presets_dir, "last_used.txt")
 
@@ -474,20 +491,27 @@ def auto_load_last_preset():
             with open(last_used_file, 'r', encoding='utf-8') as f:
                 last_preset = f.read().strip()
 
-            if last_preset:
-                result = load_preset(last_preset)
-                return result
+            if last_preset and last_preset in presets:
+                print(f"Auto-loading last used preset: {last_preset}")
+                # Load the preset and update dropdown to select it
+                loaded_values = load_preset(last_preset)
+                # Return dropdown with selected preset + all loaded UI values
+                return gr.update(choices=presets, value=last_preset), *loaded_values[:-1], f"Auto-loaded preset '{last_preset}'"
+            else:
+                print(f"Last used preset '{last_preset}' not found, starting with empty selection")
 
-        return [gr.update() for _ in range(21)] + [None, ""]
+        # No preset to auto-load, just return initialized dropdown
+        return gr.update(choices=presets, value=None), *[gr.update() for _ in range(27)], ""
 
     except Exception as e:
-        print(f"Warning: Could not auto-load last preset: {e}")
-        return [gr.update() for _ in range(21)] + [None, ""]
+        print(f"Warning: Could not initialize app with auto-load: {e}")
+        presets = get_available_presets()
+        return gr.update(choices=presets, value=None), *[gr.update() for _ in range(27)], ""
 
 def initialize_app():
     """Initialize app with preset dropdown choices."""
     presets = get_available_presets()
-    return gr.update(choices=presets)
+    return gr.update(choices=presets, value=None)
 
 def save_generation_metadata(output_path, generation_params, used_seed):
     """Save generation metadata as a .txt file alongside the video."""
@@ -1409,8 +1433,19 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             shift, video_guidance_scale, audio_guidance_scale, slg_layer,
             blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
             video_negative_prompt, audio_negative_prompt,
+            batch_input_folder, batch_output_folder, batch_skip_existing,
         ],
-        outputs=[preset_dropdown, gr.Textbox(visible=False), gr.Textbox(visible=False)],  # Update dropdown, clear messages
+        outputs=[
+            preset_dropdown, preset_name,  # Update dropdown, clear name field
+            video_text_prompt, aspect_ratio, video_width, video_height, auto_crop_image,
+            video_seed, randomize_seed, no_audio, save_metadata,
+            solver_name, sample_steps, num_generations,
+            shift, video_guidance_scale, audio_guidance_scale, slg_layer,
+            blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
+            video_negative_prompt, audio_negative_prompt,
+            batch_input_folder, batch_output_folder, batch_skip_existing,
+            gr.Textbox(visible=False)  # status message
+        ],
     )
 
     load_preset_btn.click(
@@ -1423,6 +1458,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             shift, video_guidance_scale, audio_guidance_scale, slg_layer,
             blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
             video_negative_prompt, audio_negative_prompt,
+            batch_input_folder, batch_output_folder, batch_skip_existing,
             preset_dropdown, gr.Textbox(visible=False)  # Update current preset, status message
         ],
     )
@@ -1438,15 +1474,33 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             shift, video_guidance_scale, audio_guidance_scale, slg_layer,
             blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
             video_negative_prompt, audio_negative_prompt,
+            batch_input_folder, batch_output_folder, batch_skip_existing,
             preset_dropdown, gr.Textbox(visible=False)  # Update current preset, status message
         ],
     )
 
-    # Initialize presets dropdown
-    demo.load(
+    # Hook up refresh presets button
+    refresh_presets_btn.click(
         fn=initialize_app,
         inputs=[],
         outputs=[preset_dropdown],
+    )
+
+    # Initialize presets dropdown and auto-load last preset
+    demo.load(
+        fn=initialize_app_with_auto_load,
+        inputs=[],
+        outputs=[
+            preset_dropdown,  # dropdown with choices and selected value
+            video_text_prompt, aspect_ratio, video_width, video_height, auto_crop_image,
+            video_seed, randomize_seed, no_audio, save_metadata,
+            solver_name, sample_steps, num_generations,
+            shift, video_guidance_scale, audio_guidance_scale, slg_layer,
+            blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
+            video_negative_prompt, audio_negative_prompt,
+            batch_input_folder, batch_output_folder, batch_skip_existing,
+            gr.Textbox(visible=False)  # status message
+        ],
     )
 
 if __name__ == "__main__":

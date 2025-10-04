@@ -110,6 +110,16 @@ class OviFusionEngine:
         # For CPU-only T5, encoding happens on CPU, then we move embeddings to GPU
         print(f"Encoding text prompts...")
         encode_device = 'cpu' if self.cpu_only_t5 else self.device
+
+        # Ensure T5 model is on the correct device before encoding
+        # (it might have been offloaded to CPU after the previous generation)
+        if hasattr(self.text_model, 'model') and self.text_model.model is not None:
+            current_device = next(self.text_model.model.parameters()).device
+            target_device = torch.device('cpu') if self.cpu_only_t5 else self.device
+            if current_device != target_device:
+                print(f"Moving T5 model from {current_device} to {target_device} for encoding...")
+                self.text_model.model = self.text_model.model.to(target_device)
+
         text_embeddings = self.text_model([text_prompt, video_negative_prompt, audio_negative_prompt], encode_device)
         
         # Move embeddings to target device and dtype
