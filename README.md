@@ -37,9 +37,11 @@ https://youtu.be/uE0QabiHmRw
 - Look the examples to understand how to prompt the model that is extremely important
 - Look our below screenshots to see the app features
 
-![screencapture-127-0-0-1-7861-2025-10-04-02_23_46](https://cdn-uploads.huggingface.co/production/uploads/6345bd89fe134dfd7a0dba40/6nV3Ey9De1syLEfR85_cZ.png)
+<img width="1970" height="947" alt="asdasf" src="https://github.com/user-attachments/assets/a0e71ad8-f192-41e9-8911-dafdea4d3785" />
 
-![asdasf](https://cdn-uploads.huggingface.co/production/uploads/6345bd89fe134dfd7a0dba40/LcVKqOwbwlhfKJQwhE1FV.png)
+
+<img width="3840" height="3391" alt="screencapture-127-0-0-1-7861-2025-10-04-02_23_46" src="https://github.com/user-attachments/assets/83647808-5086-473b-bee0-87177c614122" />
+
 
 https://cdn-uploads.huggingface.co/production/uploads/6345bd89fe134dfd7a0dba40/w32NsLzjgN3aCAU-WrWGL.mp4
 
