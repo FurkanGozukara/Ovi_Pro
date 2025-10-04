@@ -12,6 +12,34 @@ from ovi.utils.io_utils import save_video
 from ovi.utils.processing_utils import clean_text, scale_hw_to_area_divisible
 from PIL import Image
 
+def detect_gpu_info():
+    """Detect GPU model and VRAM size."""
+    try:
+        if torch.cuda.is_available():
+            device_count = torch.cuda.device_count()
+            if device_count > 0:
+                # Get primary GPU info
+                gpu_name = torch.cuda.get_device_name(0)
+                gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+
+                print("=" * 60)
+                print("GPU DETECTION RESULTS:")
+                print(f"  GPU Model: {gpu_name}")
+                print(f"  GPU Count: {device_count}")
+                print(f"  VRAM Size: {gpu_memory_gb:.2f} GB")
+                print("=" * 60)
+
+                return gpu_name, gpu_memory_gb
+            else:
+                print("GPU DETECTION: CUDA available but no devices found")
+                return None, 0
+        else:
+            print("GPU DETECTION: CUDA not available")
+            return None, 0
+    except Exception as e:
+        print(f"GPU DETECTION ERROR: {e}")
+        return None, 0
+
 # ----------------------------
 # Parse CLI Args
 # ----------------------------
@@ -643,8 +671,69 @@ def initialize_app_with_auto_load():
             else:
                 print(f"Last used preset '{last_preset}' not found, starting with empty selection")
 
-        # No preset to auto-load, just return initialized dropdown
-        return gr.update(choices=presets, value=None), *[gr.update() for _ in range(27)], ""
+        # No preset to auto-load - check VRAM and apply optimizations
+        print("No preset auto-loaded - checking GPU VRAM for automatic optimizations...")
+
+        gpu_name, vram_gb = detect_gpu_info()
+
+        # Apply VRAM-based optimizations
+        fp8_t5_update = gr.update()  # Default: False
+        clear_all_update = gr.update()  # Default: True
+
+        optimization_messages = []
+
+        if vram_gb > 0:
+            if vram_gb < 23:
+                # Enable Scaled FP8 T5 for VRAM < 23GB
+                fp8_t5_update = gr.update(value=True)
+                optimization_messages.append(f"VRAM {vram_gb:.1f}GB < 23GB → Enabled Scaled FP8 T5")
+                print(f"  ✓ VRAM optimization: Enabled Scaled FP8 T5 (VRAM: {vram_gb:.1f}GB < 23GB)")
+
+            if vram_gb > 40:
+                # Disable Clear All Memory for VRAM > 40GB
+                clear_all_update = gr.update(value=False)
+                optimization_messages.append(f"VRAM {vram_gb:.1f}GB > 40GB → Disabled Clear All Memory")
+                print(f"  ✓ VRAM optimization: Disabled Clear All Memory (VRAM: {vram_gb:.1f}GB > 40GB)")
+
+        if optimization_messages:
+            status_message = "Applied VRAM optimizations: " + ", ".join(optimization_messages)
+        else:
+            status_message = f"GPU detected ({gpu_name}, {vram_gb:.1f}GB VRAM) - using default settings"
+            print(f"  ✓ No VRAM optimizations needed (VRAM: {vram_gb:.1f}GB in optimal range)")
+
+        # Return initialized dropdown with VRAM-optimized defaults
+        # The order must match the outputs list in demo.load()
+        return (
+            dropdown_update,  # preset_dropdown
+            gr.update(),  # video_text_prompt
+            gr.update(),  # aspect_ratio
+            gr.update(),  # video_width
+            gr.update(),  # video_height
+            gr.update(),  # auto_crop_image
+            gr.update(),  # video_seed
+            gr.update(),  # randomize_seed
+            gr.update(),  # no_audio
+            gr.update(),  # save_metadata
+            gr.update(),  # solver_name
+            gr.update(),  # sample_steps
+            gr.update(),  # num_generations
+            gr.update(),  # shift
+            gr.update(),  # video_guidance_scale
+            gr.update(),  # audio_guidance_scale
+            gr.update(),  # slg_layer
+            gr.update(),  # blocks_to_swap
+            gr.update(),  # cpu_offload
+            gr.update(),  # delete_text_encoder
+            fp8_t5_update,  # fp8_t5 (potentially modified)
+            gr.update(),  # cpu_only_t5
+            gr.update(),  # video_negative_prompt
+            gr.update(),  # audio_negative_prompt
+            gr.update(),  # batch_input_folder
+            gr.update(),  # batch_output_folder
+            gr.update(),  # batch_skip_existing
+            clear_all_update,  # clear_all (potentially modified)
+            status_message  # status message
+        )
 
     except Exception as e:
         print(f"Warning: Could not initialize app with auto-load: {e}")
@@ -1102,7 +1191,7 @@ def on_image_upload(image_path, auto_crop_image):
 theme = gr.themes.Soft()
 theme.font = [gr.themes.GoogleFont("Inter"), "Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v2.6 : https://www.patreon.com/posts/140393220")
+    gr.Markdown("# Ovi Pro SECourses Premium App v2.7 : https://www.patreon.com/posts/140393220")
 
     image_to_use = gr.State(value=None)
 
