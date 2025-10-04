@@ -501,6 +501,8 @@ ASPECT_RATIOS = {
     "9:16 Portrait": [512, 992],
     "9:16 Portrait (960)": [512, 960],
     "16:9 Landscape (960)": [960, 512],
+    "4:3 Standard": [896, 672],
+    "3:4 Portrait": [672, 896],
     "1:1 Square": [720, 720],
     "5:2 Ultra-wide": [448, 1120]
 }
