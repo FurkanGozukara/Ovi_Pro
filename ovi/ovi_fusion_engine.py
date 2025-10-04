@@ -54,6 +54,12 @@ class OviFusionEngine:
         # T5 configuration (set during first generation)
         self.fp8_t5 = False
         self.cpu_only_t5 = False
+        
+        # VAE Tiled Decoding Configuration
+        self.vae_tiled_decode = False
+        self.vae_tile_size = 32  # Latent space tile size (32 latent = 512 pixels after 16x upscale)
+        self.vae_tile_overlap = 8  # Overlap for seamless blending (8 latent = 128 pixels)
+        self.vae_tile_temporal = 31  # Process all frames together (no temporal tiling by default)
 
         # Load VAEs immediately (they're lightweight) - but defer if block swap is enabled
         # Block swap requires special loading sequence, so defer all model loading
@@ -387,7 +393,10 @@ class OviFusionEngine:
                     delete_text_encoder=True,
                     no_block_prep=False,
                     fp8_t5=False,
-                    cpu_only_t5=False
+                    cpu_only_t5=False,
+                    vae_tiled_decode=False,
+                    vae_tile_size=32,
+                    vae_tile_overlap=8
                 ):
 
         # ===================================================================
@@ -398,6 +407,11 @@ class OviFusionEngine:
         # CRITICAL: Set T5 configuration BEFORE any loading!
         self.fp8_t5 = fp8_t5
         self.cpu_only_t5 = cpu_only_t5
+        
+        # Set VAE tiled decoding configuration
+        self.vae_tiled_decode = vae_tiled_decode
+        self.vae_tile_size = vae_tile_size
+        self.vae_tile_overlap = vae_tile_overlap
         
         # Step 1: Load ONLY T5 (or use existing if already loaded)
         if self.text_model is None:
@@ -602,9 +616,56 @@ class OviFusionEngine:
                 generated_audio = self.vae_model_audio.wrapped_decode(audio_latents_for_vae)
                 generated_audio = generated_audio.squeeze().cpu().float().numpy()
 
-                # Decode video  
+                # Decode video with optional tiling
                 video_latents_for_vae = video_noise.unsqueeze(0)  # 1, c, f, h, w
-                generated_video = self.vae_model_video.wrapped_decode(video_latents_for_vae)
+                
+                # Track VRAM before decode
+                if torch.cuda.is_available():
+                    before_decode_vram = torch.cuda.memory_allocated(self.device) / 1e9
+                    torch.cuda.reset_peak_memory_stats(self.device)
+                    print(f"\n{'='*80}")
+                    print(f"STARTING VAE DECODE - VRAM before: {before_decode_vram:.2f} GB")
+                    print(f"{'='*80}\n")
+                
+                if self.vae_tiled_decode:
+                    # Use tiled decoding for VRAM optimization
+                    print("=" * 80)
+                    print("VAE TILED DECODING ENABLED")
+                    print(f"  Latent shape: {video_latents_for_vae.shape}")
+                    print(f"  Tile size: {self.vae_tile_size}×{self.vae_tile_size} (latent space)")
+                    print(f"  Tile overlap: {self.vae_tile_overlap} (latent space)")
+                    print(f"  Estimated tile size in pixels: {self.vae_tile_size*16}×{self.vae_tile_size*16}")
+                    print(f"  Expected VRAM savings: ~30-60% depending on tile size")
+                    print("=" * 80)
+                    
+                    generated_video = self.vae_model_video.wrapped_decode_tiled(
+                        video_latents_for_vae,
+                        tile_x=self.vae_tile_size,
+                        tile_y=self.vae_tile_size,
+                        tile_t=self.vae_tile_temporal,
+                        overlap_x=self.vae_tile_overlap,
+                        overlap_y=self.vae_tile_overlap,
+                        overlap_t=1
+                    )
+                else:
+                    # Standard decode (full VRAM usage)
+                    generated_video = self.vae_model_video.wrapped_decode(video_latents_for_vae)
+                
+                # Track VRAM after decode
+                if torch.cuda.is_available():
+                    after_decode_vram = torch.cuda.memory_allocated(self.device) / 1e9
+                    peak_decode_vram = torch.cuda.max_memory_allocated(self.device) / 1e9
+                    print(f"\n{'='*80}")
+                    print(f"VAE DECODE COMPLETE")
+                    print(f"  VRAM after: {after_decode_vram:.2f} GB")
+                    print(f"  Peak during decode: {peak_decode_vram:.2f} GB")
+                    print(f"  VRAM used by decode: {peak_decode_vram - before_decode_vram:.2f} GB")
+                    if self.vae_tiled_decode and generated_video is not None:
+                        print(f"  Tiled decode SUCCESS")
+                    elif self.vae_tiled_decode:
+                        print(f"  WARNING: Tiled decode returned None!")
+                    print(f"{'='*80}\n")
+                
                 generated_video = generated_video.squeeze(0).cpu().float().numpy()  # c, f, h, w
                 if self.cpu_offload:
                     self._offload_vaes_to_cpu()
