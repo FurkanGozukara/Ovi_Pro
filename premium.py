@@ -603,36 +603,10 @@ def reset_cancellation():
     cancel_generation = False
 
 def generate_with_cancellation_check(generate_func, **kwargs):
-    """Run generation function with periodic cancellation checks."""
-    import threading
-    import time
-
-    result = [None]  # Use list to store result from thread
-    exception = [None]  # Use list to store exception from thread
-    generation_thread = None
-
-    def generation_worker():
-        """Worker function that runs the generation."""
-        try:
-            result[0] = generate_func(**kwargs)
-        except Exception as e:
-            exception[0] = e
-
-    # Start generation in a separate thread
-    generation_thread = threading.Thread(target=generation_worker, daemon=True)
-    generation_thread.start()
-
-    # Wait for completion while checking for cancellation
-    while generation_thread.is_alive():
-        # Check for cancellation every 0.5 seconds
-        time.sleep(0.5)
-        check_cancellation()
-
-    # Check if an exception occurred in the thread
-    if exception[0]:
-        raise exception[0]
-
-    return result[0]
+    """Run generation function with built-in cancellation checks."""
+    # Add the cancellation check function to kwargs so it gets passed to the engine
+    kwargs['cancellation_check'] = check_cancellation
+    return generate_func(**kwargs)
 
 def get_presets_dir():
     """Get the presets directory path."""

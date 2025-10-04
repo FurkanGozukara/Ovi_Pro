@@ -396,7 +396,8 @@ class OviFusionEngine:
                     cpu_only_t5=False,
                     vae_tiled_decode=False,
                     vae_tile_size=32,
-                    vae_tile_overlap=8
+                    vae_tile_overlap=8,
+                    cancellation_check=None
                 ):
 
         # ===================================================================
@@ -541,6 +542,10 @@ class OviFusionEngine:
             
             with torch.amp.autocast('cuda', enabled=self.target_dtype != torch.float32, dtype=self.target_dtype):
                 for i, (t_v, t_a) in tqdm(enumerate(zip(timesteps_video, timesteps_audio))):
+                    # Check for cancellation at the start of each sampling step
+                    if cancellation_check is not None:
+                        cancellation_check()
+
                     timestep_input = torch.full((1,), t_v, device=self.device)
 
                     if is_i2v:
