@@ -567,13 +567,13 @@ def load_preset(preset_name):
     """Load a preset and return all UI values."""
     try:
         if not preset_name:
-            return [gr.update() for _ in range(27)] + ["No preset selected"]
+            return [gr.update() for _ in range(27)] + [gr.update(value=None)] + ["No preset selected"]
 
         presets_dir = get_presets_dir()
         preset_file = os.path.join(presets_dir, f"{preset_name}.json")
 
         if not os.path.exists(preset_file):
-            return [gr.update() for _ in range(27)] + [f"Preset '{preset_name}' not found"]
+            return [gr.update() for _ in range(27)] + [gr.update(value=None)] + [f"Preset '{preset_name}' not found"]
 
         with open(preset_file, 'r', encoding='utf-8') as f:
             import json
@@ -618,7 +618,7 @@ def load_preset(preset_name):
         )
 
     except Exception as e:
-        return [gr.update() for _ in range(28)] + [f"Error loading preset: {e}"]
+        return [gr.update() for _ in range(27)] + [gr.update(value=None)] + [f"Error loading preset: {e}"]
 
 def initialize_app_with_auto_load():
     """Initialize app with preset dropdown choices and auto-load last preset."""
@@ -644,12 +644,12 @@ def initialize_app_with_auto_load():
                 print(f"Last used preset '{last_preset}' not found, starting with empty selection")
 
         # No preset to auto-load, just return initialized dropdown
-        return gr.update(choices=presets, value=None), *[gr.update() for _ in range(28)], ""
+        return gr.update(choices=presets, value=None), *[gr.update() for _ in range(27)], ""
 
     except Exception as e:
         print(f"Warning: Could not initialize app with auto-load: {e}")
         presets = get_available_presets()
-        return gr.update(choices=presets, value=None), *[gr.update() for _ in range(28)], ""
+        return gr.update(choices=presets, value=None), *[gr.update() for _ in range(27)], ""
 
 def initialize_app():
     """Initialize app with preset dropdown choices."""
@@ -1102,7 +1102,7 @@ def on_image_upload(image_path, auto_crop_image):
 theme = gr.themes.Soft()
 theme.font = [gr.themes.GoogleFont("Inter"), "Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v2 : https://www.patreon.com/posts/140393220")
+    gr.Markdown("# Ovi Pro SECourses Premium App v2.5 : https://www.patreon.com/posts/140393220")
 
     image_to_use = gr.State(value=None)
 
@@ -1235,7 +1235,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                         with gr.Row():
                             delete_text_encoder = gr.Checkbox(
                                 label="Delete T5 After Encoding",
-                                value=True,
+                                value=False,
                                 info="Delete T5 encoder after text encoding to save ~5GB VRAM"
                             )
                             fp8_t5 = gr.Checkbox(
@@ -1707,7 +1707,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             shift, video_guidance_scale, audio_guidance_scale, slg_layer,
             blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
             video_negative_prompt, audio_negative_prompt,
-            batch_input_folder, batch_output_folder, batch_skip_existing,
+            batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
             gr.Textbox(visible=False)  # status message
         ],
     )
