@@ -337,7 +337,7 @@ def save_preset(preset_name, current_preset,
                 video_seed, randomize_seed, no_audio, save_metadata,
                 solver_name, sample_steps, num_generations,
                 shift, video_guidance_scale, audio_guidance_scale, slg_layer,
-                blocks_to_swap, cpu_offload,
+                blocks_to_swap, cpu_offload, delete_text_encoder,
                 video_negative_prompt, audio_negative_prompt):
     """Save current UI state as a preset."""
     try:
@@ -372,6 +372,7 @@ def save_preset(preset_name, current_preset,
             "slg_layer": slg_layer,
             "blocks_to_swap": blocks_to_swap,
             "cpu_offload": cpu_offload,
+            "delete_text_encoder": delete_text_encoder,
             "video_negative_prompt": video_negative_prompt,
             "audio_negative_prompt": audio_negative_prompt,
             "saved_at": datetime.now().isoformat()
@@ -433,6 +434,7 @@ def load_preset(preset_name):
             gr.update(value=preset_data.get("slg_layer", 11)),
             gr.update(value=preset_data.get("blocks_to_swap", 12)),
             gr.update(value=preset_data.get("cpu_offload", True)),
+            gr.update(value=preset_data.get("delete_text_encoder", True)),
             gr.update(value=preset_data.get("video_negative_prompt", "jitter, bad hands, blur, distortion")),
             gr.update(value=preset_data.get("audio_negative_prompt", "robotic, muffled, echo, distorted")),
             preset_name,
@@ -440,7 +442,7 @@ def load_preset(preset_name):
         )
 
     except Exception as e:
-        return [gr.update() for _ in range(18)] + [None, f"Error loading preset: {e}"]
+        return [gr.update() for _ in range(19)] + [None, f"Error loading preset: {e}"]
 
 def auto_load_last_preset():
     """Auto-load the last used preset on startup."""
@@ -456,11 +458,11 @@ def auto_load_last_preset():
                 result = load_preset(last_preset)
                 return result
 
-        return [gr.update() for _ in range(18)] + [None, ""]
+        return [gr.update() for _ in range(19)] + [None, ""]
 
     except Exception as e:
         print(f"Warning: Could not auto-load last preset: {e}")
-        return [gr.update() for _ in range(18)] + [None, ""]
+        return [gr.update() for _ in range(19)] + [None, ""]
 
 def initialize_app():
     """Initialize app with preset dropdown choices."""
@@ -961,7 +963,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                                 info="Skip Layer Guidance layer - affects audio-video synchronization"
                             )
 
-                        # Block Swap and CPU Offload in same row
+                        # Block Swap, CPU Offload, and Text Encoder options
                         with gr.Row():
                             blocks_to_swap = gr.Slider(
                                 minimum=0,
@@ -975,6 +977,11 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                                 label="CPU Offload",
                                 value=True,
                                 info="Offload models to CPU between operations to save VRAM"
+                            )
+                            delete_text_encoder = gr.Checkbox(
+                                label="Delete Text Encoder After Encoding",
+                                value=True,
+                                info="Delete T5 encoder after text encoding to save ~5GB VRAM (recommended)"
                             )
 
                         # Negative prompts in same row, 3 lines each
@@ -991,9 +998,6 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                                 lines=3,
                                 value="robotic, muffled, echo, distorted"
                             )
-
-                        # Hidden checkbox for delete_text_encoder (always enabled)
-                        delete_text_encoder = gr.Checkbox(label="Delete Text Encoder After Encoding", value=True, visible=False)
 
                 with gr.Column():
                     output_path = gr.Video(label="Generated Video")
@@ -1363,7 +1367,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             video_seed, randomize_seed, no_audio, save_metadata,
             solver_name, sample_steps, num_generations,
             shift, video_guidance_scale, audio_guidance_scale, slg_layer,
-            blocks_to_swap, cpu_offload,
+            blocks_to_swap, cpu_offload, delete_text_encoder,
             video_negative_prompt, audio_negative_prompt,
         ],
         outputs=[preset_dropdown, gr.Textbox(visible=False), gr.Textbox(visible=False)],  # Update dropdown, clear messages
@@ -1377,7 +1381,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             video_seed, randomize_seed, no_audio, save_metadata,
             solver_name, sample_steps, num_generations,
             shift, video_guidance_scale, audio_guidance_scale, slg_layer,
-            blocks_to_swap, cpu_offload,
+            blocks_to_swap, cpu_offload, delete_text_encoder,
             video_negative_prompt, audio_negative_prompt,
             preset_dropdown, gr.Textbox(visible=False)  # Update current preset, status message
         ],
@@ -1392,7 +1396,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             video_seed, randomize_seed, no_audio, save_metadata,
             solver_name, sample_steps, num_generations,
             shift, video_guidance_scale, audio_guidance_scale, slg_layer,
-            blocks_to_swap, cpu_offload,
+            blocks_to_swap, cpu_offload, delete_text_encoder,
             video_negative_prompt, audio_negative_prompt,
             preset_dropdown, gr.Textbox(visible=False)  # Update current preset, status message
         ],
@@ -1407,37 +1411,94 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
 
 if __name__ == "__main__":
     if args.test:
-        # Test mode: automatically run generation
+        # Test mode: activate venv and run generation
         print("=" * 80)
-        print("TEST MODE ENABLED")
+        print("TEST MODE ENABLED - ACTIVATING VENV")
         print("=" * 80)
-        
-        test_output = generate_video(
-            text_prompt=args.test_prompt,
-            image=None,
-            video_frame_height=512,
-            video_frame_width=992,
-            video_seed=99,
-            solver_name="unipc",
-            sample_steps=1,  # Reduced to 1 for fast testing
-            shift=5.0,
-            video_guidance_scale=4.0,
-            audio_guidance_scale=3.0,
-            slg_layer=11,
-            blocks_to_swap=args.blocks_to_swap,
-            video_negative_prompt="jitter, bad hands, blur, distortion",
-            audio_negative_prompt="robotic, muffled, echo, distorted",
-            use_image_gen=False,
-            cpu_offload=args.test_cpu_offload,
-            delete_text_encoder=True,
-            no_audio=False,
-            no_block_prep=False,
-            num_generations=1,
-            randomize_seed=False,
-            save_metadata=True,
-            aspect_ratio="16:9 Landscape",
-        )
-        
+
+        # Activate venv before running test
+        import subprocess
+        import sys
+
+        try:
+            # Check if we're in the right directory and venv exists
+            venv_path = os.path.join(os.path.dirname(__file__), "venv")
+            if os.path.exists(venv_path):
+                print(f"Activating venv at: {venv_path}")
+
+                # On Windows, use the activate script
+                if sys.platform == "win32":
+                    activate_script = os.path.join(venv_path, "Scripts", "activate.bat")
+                    if os.path.exists(activate_script):
+                        # Run the test with venv activated
+                        cmd = f'"{activate_script}" && python premium.py --test --test_prompt="{args.test_prompt}" --blocks_to_swap={args.blocks_to_swap} {"--test_cpu_offload" if args.test_cpu_offload else ""}'
+                        print(f"Running test command: {cmd}")
+                        result = subprocess.run(cmd, shell=True, cwd=os.path.dirname(__file__))
+                        sys.exit(result.returncode)
+                    else:
+                        print(f"Warning: activate.bat not found at {activate_script}")
+                else:
+                    # On Linux/Mac, source the activate script
+                    activate_script = os.path.join(venv_path, "bin", "activate")
+                    if os.path.exists(activate_script):
+                        cmd = f'source "{activate_script}" && python premium.py --test --test_prompt="{args.test_prompt}" --blocks_to_swap={args.blocks_to_swap} {"--test_cpu_offload" if args.test_cpu_offload else ""}'
+                        print(f"Running test command: {cmd}")
+                        result = subprocess.run(cmd, shell=True, cwd=os.path.dirname(__file__))
+                        sys.exit(result.returncode)
+                    else:
+                        print(f"Warning: activate script not found at {activate_script}")
+            else:
+                print(f"Warning: venv not found at {venv_path}")
+
+            # If venv activation failed, run directly (fallback)
+            print("Running test without venv activation...")
+
+        except Exception as e:
+            print(f"Error setting up venv: {e}")
+            print("Running test without venv activation...")
+
+        # Run test generation (fallback if venv setup failed)
+        # Use gradio defaults, only override with test args
+        test_params = {
+            # Gradio defaults
+            'text_prompt': "",
+            'image': None,
+            'video_frame_height': 512,
+            'video_frame_width': 992,
+            'video_seed': 99,
+            'solver_name': "unipc",
+            'sample_steps': 50,
+            'shift': 5.0,
+            'video_guidance_scale': 4.0,
+            'audio_guidance_scale': 3.0,
+            'slg_layer': 11,
+            'blocks_to_swap': 12,
+            'video_negative_prompt': "jitter, bad hands, blur, distortion",
+            'audio_negative_prompt': "robotic, muffled, echo, distorted",
+            'use_image_gen': False,
+            'cpu_offload': True,
+            'delete_text_encoder': True,
+            'no_audio': False,
+            'no_block_prep': False,
+            'num_generations': 1,
+            'randomize_seed': False,
+            'save_metadata': True,
+            'aspect_ratio': "16:9 Landscape",
+        }
+
+        # Override with test args only (not replace all values)
+        if hasattr(args, 'test_prompt') and args.test_prompt:
+            test_params['text_prompt'] = args.test_prompt
+        if hasattr(args, 'blocks_to_swap'):
+            test_params['blocks_to_swap'] = args.blocks_to_swap
+        if hasattr(args, 'test_cpu_offload'):
+            test_params['cpu_offload'] = args.test_cpu_offload
+
+        # For test mode, use minimal sample steps for speed
+        test_params['sample_steps'] = 2
+
+        test_output = generate_video(**test_params)
+
         if test_output:
             print(f"\n[SUCCESS] Test generation completed successfully: {test_output}")
         else:

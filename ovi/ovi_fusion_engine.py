@@ -72,46 +72,60 @@ class OviFusionEngine:
         """
         Encode text prompts and optionally delete T5 to save VRAM during generation.
         This is the FIRST operation after loading models.
+        T5 is loaded directly to GPU for maximum performance.
         """
         # Check if T5 needs to be reloaded (was deleted in previous generation)
         if self.text_model is None:
-            print("Reloading T5 text encoder for new generation...")
+            print("Loading T5 text encoder directly to GPU for encoding...")
             device_idx = self.device if isinstance(self.device, int) else (self.device.index if self.device.index is not None else 0)
-            t5_load_device = "cpu" if self.cpu_offload else device_idx
-            self.text_model = init_text_model(self.config.ckpt_dir, rank=t5_load_device)
-            if self.cpu_offload:
-                print("T5 text encoder loaded on CPU")
-        
-        # Move T5 to GPU for encoding if using CPU offload
-        if self.cpu_offload:
-            self.text_model.model = self.text_model.model.to(self.device)
-        
-        # Encode text embeddings
+            # Always load T5 directly to GPU for encoding (no point loading to CPU first)
+            self.text_model = init_text_model(self.config.ckpt_dir, rank=device_idx)
+            print("T5 text encoder loaded directly to GPU")
+
+        # Encode text embeddings (T5 is already on GPU)
         print(f"Encoding text prompts...")
-        encoding_device = self.device if self.cpu_offload else self.text_model.device
-        text_embeddings = self.text_model([text_prompt, video_negative_prompt, audio_negative_prompt], encoding_device)
+        text_embeddings = self.text_model([text_prompt, video_negative_prompt, audio_negative_prompt], self.device)
         text_embeddings = [emb.to(self.target_dtype).to(self.device) for emb in text_embeddings]
-        
-        # Delete T5 to free VRAM if enabled
+
+        # Handle T5 cleanup based on settings
         if delete_text_encoder:
             print("Deleting T5 text encoder to free VRAM (~5GB saved)...")
             if torch.cuda.is_available():
                 before_delete_vram = torch.cuda.memory_allocated(self.device) / 1e9
-            
-            del self.text_model
-            self.text_model = None
-            torch.cuda.empty_cache()
-            
+
+            # Ensure T5 is properly deleted from both RAM and VRAM
+            if hasattr(self, 'text_model') and self.text_model is not None:
+                # Clear any GPU references first
+                if hasattr(self.text_model, 'model') and self.text_model.model is not None:
+                    self.text_model.model = None
+
+                # Delete the text model object
+                del self.text_model
+                self.text_model = None
+
+                # Force garbage collection to free RAM
+                import gc
+                gc.collect()
+
+                # Clear CUDA cache to free VRAM
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize(self.device)
+
             if torch.cuda.is_available():
                 after_delete_vram = torch.cuda.memory_allocated(self.device) / 1e9
                 freed_vram = before_delete_vram - after_delete_vram
                 print(f"T5 deleted. VRAM freed: {freed_vram:.2f} GB")
                 print(f"Current VRAM: {after_delete_vram:.2f} GB")
         else:
-            # Keep T5 but offload to CPU if enabled
+            # Keep T5 but offload to CPU if CPU offloading is enabled
             if self.cpu_offload:
+                print("Keeping T5 and offloading to CPU for future reuse...")
                 self.offload_to_cpu(self.text_model.model)
-        
+                print("T5 text encoder offloaded to CPU")
+            else:
+                print("Keeping T5 in GPU memory (CPU offload disabled)")
+
         return text_embeddings
 
     def _load_vaes(self):
@@ -152,16 +166,15 @@ class OviFusionEngine:
             self._load_vaes()
         
         # ===================================================================
-        # OPTIMIZATION: Load T5 text encoder FIRST if we're going to delete it
+        # OPTIMIZATION: Load T5 text encoder FIRST directly to GPU
         # This prevents having both T5 (~24GB) and Fusion (~45GB) in RAM at same time
         # ===================================================================
         if load_text_encoder and self.text_model is None:
             device_idx = self.device if isinstance(self.device, int) else (self.device.index if self.device.index is not None else 0)
-            t5_load_device = "cpu" if self.cpu_offload else device_idx
-            print(f"Loading T5 text encoder to {t5_load_device} (BEFORE fusion model to save RAM)...")
-            self.text_model = init_text_model(self.config.ckpt_dir, rank=t5_load_device)
-            if self.cpu_offload:
-                print("T5 text encoder loaded on CPU")
+            # Always load T5 directly to GPU for encoding (no point loading to CPU first)
+            print(f"Loading T5 text encoder directly to GPU (BEFORE fusion model to save RAM)...")
+            self.text_model = init_text_model(self.config.ckpt_dir, rank=device_idx)
+            print("T5 text encoder loaded directly to GPU")
             print("=" * 80)
 
             # Load image model if needed
@@ -169,7 +182,7 @@ class OviFusionEngine:
                 print(f"Loading Flux Krea for first frame generation...")
                 self.image_model = FluxPipeline.from_pretrained("black-forest-labs/FLUX.1-Krea-dev", torch_dtype=torch.bfloat16)
                 self.image_model.enable_model_cpu_offload(gpu_id=self.device)
-            
+
             # RETURN EARLY - Don't load fusion model yet!
             print("T5 loaded. Fusion model will load AFTER text encoding.")
             return
