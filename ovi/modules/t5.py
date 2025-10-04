@@ -300,6 +300,12 @@ class T5Encoder(nn.Module):
         # initialize weights
         self.apply(init_weights)
 
+    def prepare_fp8(self, target_dtype=torch.bfloat16):
+        """Prepare model for FP8 inference by keeping LayerNorm and Embeddings in target dtype"""
+        for module in self.modules():
+            if module.__class__.__name__ in ['T5LayerNorm', 'Embedding']:
+                module.to(target_dtype)
+
     def forward(self, ids, mask=None):
         x = self.token_embedding(ids)
         x = self.dropout(x)
@@ -479,21 +485,78 @@ class T5EncoderModel:
         checkpoint_path=None,
         tokenizer_path=None,
         shard_fn=None,
+        fp8=False,
     ):
         self.text_len = text_len
-        self.dtype = dtype
+        self.dtype = dtype if not fp8 else torch.float8_e4m3fn  # FP8 dtype for weights
         self.device = device
         self.checkpoint_path = checkpoint_path
         self.tokenizer_path = tokenizer_path
+        self.fp8 = fp8
 
-        # init model
-        model = umt5_xxl(
-            encoder_only=True,
-            return_tokenizer=False,
-            dtype=dtype,
-            device=device).eval().requires_grad_(False)
-        logging.info(f'loading {checkpoint_path}')
-        model.load_state_dict(torch.load(checkpoint_path, map_location='cpu'))
+        if fp8:
+            # Musubi Tuner approach: Load in bf16, quantize Linear weights to FP8 with scaling
+            from ovi.utils.fp8_optimization_utils import optimize_t5_to_fp8, apply_fp8_monkey_patch
+            
+            logging.info("=" * 80)
+            logging.info("Initializing T5 with Scaled FP8 Quantization (Musubi Tuner approach)")
+            logging.info("=" * 80)
+            
+            # Step 1: Load model normally in bf16 on CPU
+            logging.info(f'Loading T5 model from {checkpoint_path} in bf16 on CPU...')
+            model = umt5_xxl(
+                encoder_only=True,
+                return_tokenizer=False,
+                dtype=dtype,
+                device='cpu').eval().requires_grad_(False)
+            
+            model.load_state_dict(torch.load(checkpoint_path, map_location='cpu'))
+            logging.info("Model loaded in bf16 on CPU")
+            
+            # Step 2: Move to target device (still bf16)
+            logging.info(f"Moving model to {device}...")
+            model = model.to(device)
+            
+            # Track VRAM before FP8 optimization
+            if torch.cuda.is_available():
+                vram_before = torch.cuda.memory_allocated(device) / 1e9
+                logging.info(f"VRAM before FP8 optimization: {vram_before:.2f} GB")
+            
+            # Step 3: Quantize Linear weights to FP8 with per-block scaling
+            logging.info("Quantizing Linear layer weights to FP8 with per-block scaling...")
+            model, fp8_info = optimize_t5_to_fp8(model, device=device, block_size=64)
+            
+            # Step 4: Apply monkey patches for on-the-fly dequantization
+            logging.info("Applying FP8 forward pass monkey patches...")
+            model = apply_fp8_monkey_patch(model)
+            
+            # Step 5: Keep LayerNorm and Embeddings in bf16
+            logging.info("Ensuring LayerNorm and Embeddings remain in bf16...")
+            model.prepare_fp8(dtype)
+            
+            # Track VRAM after FP8 optimization
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize(device)
+                vram_after = torch.cuda.memory_allocated(device) / 1e9
+                vram_saved = vram_before - vram_after
+                logging.info("=" * 80)
+                logging.info("FP8 Optimization Complete!")
+                logging.info(f"  VRAM before: {vram_before:.2f} GB")
+                logging.info(f"  VRAM after:  {vram_after:.2f} GB")
+                logging.info(f"  VRAM saved:  {vram_saved:.2f} GB ({vram_saved/vram_before*100:.1f}%)")
+                logging.info(f"  Compression: {fp8_info['compression_ratio']:.2f}x")
+                logging.info("=" * 80)
+        else:
+            # Standard bf16 loading
+            model = umt5_xxl(
+                encoder_only=True,
+                return_tokenizer=False,
+                dtype=dtype,
+                device=device).eval().requires_grad_(False)
+            logging.info(f'loading {checkpoint_path}')
+            model.load_state_dict(torch.load(checkpoint_path, map_location='cpu'))
+        
         self.model = model
         if shard_fn is not None:
             self.model = shard_fn(self.model, sync_module_states=False)

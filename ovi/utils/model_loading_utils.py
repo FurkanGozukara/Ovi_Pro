@@ -59,19 +59,45 @@ def init_fusion_score_model_ovi(rank: int = 0, meta_init=False):
 
     return fusion_model, video_config, audio_config
 
-def init_text_model(ckpt_dir, rank):
+def init_text_model(ckpt_dir, rank, fp8=False, cpu_only=False):
+    """Initialize T5 text encoder model.
+    
+    Args:
+        ckpt_dir: Checkpoint directory
+        rank: Device rank (GPU index or 'cpu')
+        fp8: Use Scaled FP8 quantization for lower VRAM usage (~50% reduction)
+        cpu_only: Keep T5 on CPU and run inference on CPU (saves VRAM but slower)
+    
+    Returns:
+        T5EncoderModel instance
+    """
     wan_dir = os.path.join(ckpt_dir, "Wan2.2-TI2V-5B")
     text_encoder_path = os.path.join(wan_dir, "models_t5_umt5-xxl-enc-bf16.pth")
     text_tokenizer_path = os.path.join(wan_dir, "google/umt5-xxl")
 
+    # CPU-only mode: load T5 on CPU and keep it there
+    if cpu_only:
+        device = 'cpu'
+        print("[T5 CPU-ONLY MODE] Loading T5 text encoder on CPU for CPU inference")
+        print("[T5 CPU-ONLY MODE] This saves VRAM but encoding will be slower")
+    else:
+        device = rank
+
     text_encoder = T5EncoderModel(
         text_len=512,
         dtype=torch.bfloat16,
-        device=rank,
+        device=device,
         checkpoint_path=text_encoder_path,
         tokenizer_path=text_tokenizer_path,
-        shard_fn=None)
+        shard_fn=None,
+        fp8=fp8)
 
+    if fp8:
+        print("[SCALED FP8] T5 text encoder loaded in Scaled FP8 format")
+        print("[SCALED FP8] Expected VRAM savings: ~50% (~2.5GB saved)")
+    
+    if cpu_only:
+        print("[T5 CPU-ONLY MODE] T5 encoder ready on CPU")
 
     return text_encoder
 

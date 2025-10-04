@@ -47,6 +47,16 @@ parser.add_argument(
     action="store_true",
     help="Enable CPU offload in test mode"
 )
+parser.add_argument(
+    "--test_fp8_t5",
+    action="store_true",
+    help="Enable Scaled FP8 T5 in test mode"
+)
+parser.add_argument(
+    "--test_cpu_only_t5",
+    action="store_true",
+    help="Enable CPU-only T5 in test mode"
+)
 args = parser.parse_args()
 
 # Initialize engines with lazy loading (no models loaded yet)
@@ -79,6 +89,8 @@ def generate_video(
     use_image_gen,
     cpu_offload,
     delete_text_encoder,
+    fp8_t5,
+    cpu_only_t5,
     no_audio,
     no_block_prep,
     num_generations,
@@ -164,6 +176,8 @@ def generate_video(
                 audio_negative_prompt=audio_negative_prompt,
                 delete_text_encoder=delete_text_encoder,
                 no_block_prep=no_block_prep,
+                fp8_t5=fp8_t5,
+                cpu_only_t5=cpu_only_t5,
             )
 
             # Get next available filename in sequential format
@@ -196,6 +210,8 @@ def generate_video(
                     'blocks_to_swap': blocks_to_swap,
                     'cpu_offload': cpu_offload,
                     'delete_text_encoder': delete_text_encoder,
+                    'fp8_t5': fp8_t5,
+                    'cpu_only_t5': cpu_only_t5,
                     'video_negative_prompt': video_negative_prompt,
                     'audio_negative_prompt': audio_negative_prompt,
                     'no_audio': no_audio,
@@ -337,7 +353,7 @@ def save_preset(preset_name, current_preset,
                 video_seed, randomize_seed, no_audio, save_metadata,
                 solver_name, sample_steps, num_generations,
                 shift, video_guidance_scale, audio_guidance_scale, slg_layer,
-                blocks_to_swap, cpu_offload, delete_text_encoder,
+                blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
                 video_negative_prompt, audio_negative_prompt):
     """Save current UI state as a preset."""
     try:
@@ -373,6 +389,8 @@ def save_preset(preset_name, current_preset,
             "blocks_to_swap": blocks_to_swap,
             "cpu_offload": cpu_offload,
             "delete_text_encoder": delete_text_encoder,
+            "fp8_t5": fp8_t5,
+            "cpu_only_t5": cpu_only_t5,
             "video_negative_prompt": video_negative_prompt,
             "audio_negative_prompt": audio_negative_prompt,
             "saved_at": datetime.now().isoformat()
@@ -397,13 +415,13 @@ def load_preset(preset_name):
     """Load a preset and return all UI values."""
     try:
         if not preset_name:
-            return [gr.update() for _ in range(18)] + [None, "No preset selected"]
+            return [gr.update() for _ in range(21)] + [None, "No preset selected"]
 
         presets_dir = get_presets_dir()
         preset_file = os.path.join(presets_dir, f"{preset_name}.json")
 
         if not os.path.exists(preset_file):
-            return [gr.update() for _ in range(18)] + [None, f"Preset '{preset_name}' not found"]
+            return [gr.update() for _ in range(21)] + [None, f"Preset '{preset_name}' not found"]
 
         with open(preset_file, 'r', encoding='utf-8') as f:
             import json
@@ -435,6 +453,8 @@ def load_preset(preset_name):
             gr.update(value=preset_data.get("blocks_to_swap", 12)),
             gr.update(value=preset_data.get("cpu_offload", True)),
             gr.update(value=preset_data.get("delete_text_encoder", True)),
+            gr.update(value=preset_data.get("fp8_t5", False)),
+            gr.update(value=preset_data.get("cpu_only_t5", False)),
             gr.update(value=preset_data.get("video_negative_prompt", "jitter, bad hands, blur, distortion")),
             gr.update(value=preset_data.get("audio_negative_prompt", "robotic, muffled, echo, distorted")),
             preset_name,
@@ -442,7 +462,7 @@ def load_preset(preset_name):
         )
 
     except Exception as e:
-        return [gr.update() for _ in range(19)] + [None, f"Error loading preset: {e}"]
+        return [gr.update() for _ in range(21)] + [None, f"Error loading preset: {e}"]
 
 def auto_load_last_preset():
     """Auto-load the last used preset on startup."""
@@ -458,11 +478,11 @@ def auto_load_last_preset():
                 result = load_preset(last_preset)
                 return result
 
-        return [gr.update() for _ in range(19)] + [None, ""]
+        return [gr.update() for _ in range(21)] + [None, ""]
 
     except Exception as e:
         print(f"Warning: Could not auto-load last preset: {e}")
-        return [gr.update() for _ in range(19)] + [None, ""]
+        return [gr.update() for _ in range(21)] + [None, ""]
 
 def initialize_app():
     """Initialize app with preset dropdown choices."""
@@ -574,6 +594,8 @@ def process_batch_generation(
     audio_negative_prompt,
     cpu_offload,
     delete_text_encoder,
+    fp8_t5,
+    cpu_only_t5,
     no_audio,
     no_block_prep,
     num_generations,
@@ -696,6 +718,8 @@ def process_batch_generation(
                         audio_negative_prompt=audio_negative_prompt,
                         delete_text_encoder=delete_text_encoder,
                         no_block_prep=no_block_prep,
+                        fp8_t5=fp8_t5,
+                        cpu_only_t5=cpu_only_t5,
                     )
 
                     # Get filename with base_name prefix
@@ -728,6 +752,8 @@ def process_batch_generation(
                             'blocks_to_swap': blocks_to_swap,
                             'cpu_offload': cpu_offload,
                             'delete_text_encoder': delete_text_encoder,
+                            'fp8_t5': fp8_t5,
+                            'cpu_only_t5': cpu_only_t5,
                             'video_negative_prompt': video_negative_prompt,
                             'audio_negative_prompt': audio_negative_prompt,
                             'no_audio': no_audio,
@@ -963,7 +989,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                                 info="Skip Layer Guidance layer - affects audio-video synchronization"
                             )
 
-                        # Block Swap, CPU Offload, and Text Encoder options
+                        # Block Swap and CPU Offload
                         with gr.Row():
                             blocks_to_swap = gr.Slider(
                                 minimum=0,
@@ -978,10 +1004,23 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                                 value=True,
                                 info="Offload models to CPU between operations to save VRAM"
                             )
+                        
+                        # T5 Text Encoder Options (all in one row)
+                        with gr.Row():
                             delete_text_encoder = gr.Checkbox(
-                                label="Delete Text Encoder After Encoding",
+                                label="Delete T5 After Encoding",
                                 value=True,
-                                info="Delete T5 encoder after text encoding to save ~5GB VRAM (recommended)"
+                                info="Delete T5 encoder after text encoding to save ~5GB VRAM"
+                            )
+                            fp8_t5 = gr.Checkbox(
+                                label="Scaled FP8 T5",
+                                value=False,
+                                info="Use Scaled FP8 T5 for ~50% VRAM savings (~2.5GB saved) with high quality"
+                            )
+                            cpu_only_t5 = gr.Checkbox(
+                                label="CPU-Only T5",
+                                value=False,
+                                info="Keep T5 on CPU and run inference on CPU (saves VRAM but slower encoding)"
                             )
 
                         # Negative prompts in same row, 3 lines each
@@ -1312,7 +1351,8 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             video_text_prompt, image_to_use, video_height, video_width, video_seed, solver_name,
             sample_steps, shift, video_guidance_scale, audio_guidance_scale,
             slg_layer, blocks_to_swap, video_negative_prompt, audio_negative_prompt,
-            gr.Checkbox(value=False, visible=False), cpu_offload, delete_text_encoder, no_audio, gr.Checkbox(value=False, visible=False),
+            gr.Checkbox(value=False, visible=False), cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, 
+            no_audio, gr.Checkbox(value=False, visible=False),
             num_generations, randomize_seed, save_metadata, aspect_ratio,
         ],
         outputs=[output_path],
@@ -1352,7 +1392,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             video_height, video_width, solver_name, sample_steps, shift,
             video_guidance_scale, audio_guidance_scale, slg_layer, blocks_to_swap,
             video_negative_prompt, audio_negative_prompt, cpu_offload,
-            delete_text_encoder, no_audio, gr.Checkbox(value=False, visible=False),
+            delete_text_encoder, fp8_t5, cpu_only_t5, no_audio, gr.Checkbox(value=False, visible=False),
             num_generations, randomize_seed, save_metadata, aspect_ratio,
         ],
         outputs=[output_path],
@@ -1367,7 +1407,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             video_seed, randomize_seed, no_audio, save_metadata,
             solver_name, sample_steps, num_generations,
             shift, video_guidance_scale, audio_guidance_scale, slg_layer,
-            blocks_to_swap, cpu_offload, delete_text_encoder,
+            blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
             video_negative_prompt, audio_negative_prompt,
         ],
         outputs=[preset_dropdown, gr.Textbox(visible=False), gr.Textbox(visible=False)],  # Update dropdown, clear messages
@@ -1381,7 +1421,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             video_seed, randomize_seed, no_audio, save_metadata,
             solver_name, sample_steps, num_generations,
             shift, video_guidance_scale, audio_guidance_scale, slg_layer,
-            blocks_to_swap, cpu_offload, delete_text_encoder,
+            blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
             video_negative_prompt, audio_negative_prompt,
             preset_dropdown, gr.Textbox(visible=False)  # Update current preset, status message
         ],
@@ -1396,7 +1436,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             video_seed, randomize_seed, no_audio, save_metadata,
             solver_name, sample_steps, num_generations,
             shift, video_guidance_scale, audio_guidance_scale, slg_layer,
-            blocks_to_swap, cpu_offload, delete_text_encoder,
+            blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
             video_negative_prompt, audio_negative_prompt,
             preset_dropdown, gr.Textbox(visible=False)  # Update current preset, status message
         ],
@@ -1478,6 +1518,8 @@ if __name__ == "__main__":
             'use_image_gen': False,
             'cpu_offload': True,
             'delete_text_encoder': True,
+            'fp8_t5': False,
+            'cpu_only_t5': False,
             'no_audio': False,
             'no_block_prep': False,
             'num_generations': 1,
@@ -1493,9 +1535,24 @@ if __name__ == "__main__":
             test_params['blocks_to_swap'] = args.blocks_to_swap
         if hasattr(args, 'test_cpu_offload'):
             test_params['cpu_offload'] = args.test_cpu_offload
+        if hasattr(args, 'test_fp8_t5'):
+            test_params['fp8_t5'] = args.test_fp8_t5
+        if hasattr(args, 'test_cpu_only_t5'):
+            test_params['cpu_only_t5'] = args.test_cpu_only_t5
 
         # For test mode, use minimal sample steps for speed
         test_params['sample_steps'] = 2
+
+        print("=" * 80)
+        print("TEST CONFIGURATION:")
+        print(f"  Prompt: {test_params['text_prompt'][:50]}...")
+        print(f"  Sample Steps: {test_params['sample_steps']} (fast test)")
+        print(f"  Block Swap: {test_params['blocks_to_swap']}")
+        print(f"  CPU Offload: {test_params['cpu_offload']}")
+        print(f"  Delete T5: {test_params['delete_text_encoder']}")
+        print(f"  Scaled FP8 T5: {test_params['fp8_t5']}")
+        print(f"  CPU-Only T5: {test_params['cpu_only_t5']}")
+        print("=" * 80)
 
         test_output = generate_video(**test_params)
 

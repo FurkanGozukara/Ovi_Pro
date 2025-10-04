@@ -49,6 +49,10 @@ class OviFusionEngine:
         self.video_latent_channel = None
         self.audio_latent_length = 157
         self.video_latent_length = 31
+        
+        # T5 configuration (set during first generation)
+        self.fp8_t5 = False
+        self.cpu_only_t5 = False
 
         # Load VAEs immediately (they're lightweight) - but defer if block swap is enabled
         # Block swap requires special loading sequence, so defer all model loading
@@ -72,24 +76,51 @@ class OviFusionEngine:
         """
         Encode text prompts and optionally delete T5 to save VRAM during generation.
         This is the FIRST operation after loading models.
-        T5 is loaded directly to GPU for maximum performance.
+        Uses instance variables self.fp8_t5 and self.cpu_only_t5 for configuration.
         """
         # Check if T5 needs to be reloaded (was deleted in previous generation)
         if self.text_model is None:
-            print("Loading T5 text encoder directly to GPU for encoding...")
             device_idx = self.device if isinstance(self.device, int) else (self.device.index if self.device.index is not None else 0)
-            # Always load T5 directly to GPU for encoding (no point loading to CPU first)
-            self.text_model = init_text_model(self.config.ckpt_dir, rank=device_idx)
-            print("T5 text encoder loaded directly to GPU")
+            
+            if self.cpu_only_t5:
+                print("=" * 80)
+                print("T5 CPU-ONLY MODE: Loading T5 on CPU for CPU inference")
+                print("This saves VRAM but text encoding will be slower")
+                print("=" * 80)
+            elif self.fp8_t5:
+                print("=" * 80)
+                print("SCALED FP8 T5: Loading T5 in Scaled FP8 format")
+                print("Expected VRAM savings: ~50% (~5-6GB saved)")
+                print("=" * 80)
+            else:
+                print("Loading T5 text encoder directly to GPU for encoding...")
+            
+            # Load T5 with FP8 or CPU-only options from instance variables
+            self.text_model = init_text_model(
+                self.config.ckpt_dir, 
+                rank=device_idx, 
+                fp8=self.fp8_t5, 
+                cpu_only=self.cpu_only_t5
+            )
+            
+            if not self.cpu_only_t5 and not self.fp8_t5:
+                print("T5 text encoder loaded directly to GPU")
 
-        # Encode text embeddings (T5 is already on GPU)
+        # Encode text embeddings
+        # For CPU-only T5, encoding happens on CPU, then we move embeddings to GPU
         print(f"Encoding text prompts...")
-        text_embeddings = self.text_model([text_prompt, video_negative_prompt, audio_negative_prompt], self.device)
+        encode_device = 'cpu' if self.cpu_only_t5 else self.device
+        text_embeddings = self.text_model([text_prompt, video_negative_prompt, audio_negative_prompt], encode_device)
+        
+        # Move embeddings to target device and dtype
         text_embeddings = [emb.to(self.target_dtype).to(self.device) for emb in text_embeddings]
+        
+        if self.cpu_only_t5:
+            print("Text embeddings encoded on CPU and moved to GPU")
 
         # Handle T5 cleanup based on settings
         if delete_text_encoder:
-            print("Deleting T5 text encoder to free VRAM (~5GB saved)...")
+            print("Deleting T5 text encoder to free VRAM/RAM...")
             if torch.cuda.is_available():
                 before_delete_vram = torch.cuda.memory_allocated(self.device) / 1e9
 
@@ -118,11 +149,13 @@ class OviFusionEngine:
                 print(f"T5 deleted. VRAM freed: {freed_vram:.2f} GB")
                 print(f"Current VRAM: {after_delete_vram:.2f} GB")
         else:
-            # Keep T5 but offload to CPU if CPU offloading is enabled
-            if self.cpu_offload:
+            # Keep T5 but offload to CPU if CPU offloading is enabled (and not already CPU-only)
+            if self.cpu_offload and not self.cpu_only_t5:
                 print("Keeping T5 and offloading to CPU for future reuse...")
                 self.offload_to_cpu(self.text_model.model)
                 print("T5 text encoder offloaded to CPU")
+            elif self.cpu_only_t5:
+                print("Keeping T5 on CPU (already in CPU-only mode)")
             else:
                 print("Keeping T5 in GPU memory (CPU offload disabled)")
 
@@ -166,15 +199,35 @@ class OviFusionEngine:
             self._load_vaes()
         
         # ===================================================================
-        # OPTIMIZATION: Load T5 text encoder FIRST directly to GPU
+        # OPTIMIZATION: Load T5 text encoder FIRST
         # This prevents having both T5 (~24GB) and Fusion (~45GB) in RAM at same time
         # ===================================================================
         if load_text_encoder and self.text_model is None:
             device_idx = self.device if isinstance(self.device, int) else (self.device.index if self.device.index is not None else 0)
-            # Always load T5 directly to GPU for encoding (no point loading to CPU first)
-            print(f"Loading T5 text encoder directly to GPU (BEFORE fusion model to save RAM)...")
-            self.text_model = init_text_model(self.config.ckpt_dir, rank=device_idx)
-            print("T5 text encoder loaded directly to GPU")
+            
+            # Load T5 with FP8/CPU-only options from instance variables
+            if self.cpu_only_t5:
+                print("=" * 80)
+                print("T5 CPU-ONLY MODE: Loading T5 on CPU for CPU inference")
+                print("This saves VRAM but text encoding will be slower")
+                print("=" * 80)
+            elif self.fp8_t5:
+                print("=" * 80)
+                print("SCALED FP8 T5: Loading T5 in Scaled FP8 format")
+                print("Expected VRAM savings: ~50% (~5-6GB saved)")
+                print("=" * 80)
+            else:
+                print(f"Loading T5 text encoder directly to GPU (BEFORE fusion model to save RAM)...")
+            
+            self.text_model = init_text_model(
+                self.config.ckpt_dir, 
+                rank=device_idx,
+                fp8=self.fp8_t5,
+                cpu_only=self.cpu_only_t5
+            )
+            
+            if not self.cpu_only_t5 and not self.fp8_t5:
+                print("T5 text encoder loaded directly to GPU")
             print("=" * 80)
 
             # Load image model if needed
@@ -318,13 +371,19 @@ class OviFusionEngine:
                     video_negative_prompt="",
                     audio_negative_prompt="",
                     delete_text_encoder=True,
-                    no_block_prep=False
+                    no_block_prep=False,
+                    fp8_t5=False,
+                    cpu_only_t5=False
                 ):
 
         # ===================================================================
         # OPTIMIZATION: Load T5, encode text, DELETE T5, then load fusion model
         # This prevents having both T5 (~24GB) and Fusion (~45GB) in RAM simultaneously
         # ===================================================================
+        
+        # CRITICAL: Set T5 configuration BEFORE any loading!
+        self.fp8_t5 = fp8_t5
+        self.cpu_only_t5 = cpu_only_t5
         
         # Step 1: Load ONLY T5 (or use existing if already loaded)
         if self.text_model is None:
