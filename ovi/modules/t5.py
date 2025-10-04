@@ -3,6 +3,8 @@
 import logging
 import math
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import torch
 import torch.nn as nn
@@ -277,7 +279,9 @@ class T5Encoder(nn.Module):
                  num_layers,
                  num_buckets,
                  shared_pos=True,
-                 dropout=0.1):
+                 dropout=0.1,
+                 skip_init=False,
+                 build_parallel=False):
         super(T5Encoder, self).__init__()
         self.dim = dim
         self.dim_attn = dim_attn
@@ -293,14 +297,23 @@ class T5Encoder(nn.Module):
         self.pos_embedding = T5RelativeEmbedding(
             num_buckets, num_heads, bidirectional=True) if shared_pos else None
         self.dropout = nn.Dropout(dropout)
-        self.blocks = nn.ModuleList([
-            T5SelfAttention(dim, dim_attn, dim_ffn, num_heads, num_buckets,
-                            shared_pos, dropout) for _ in range(num_layers)
-        ])
+        def _create_block(_):
+            return T5SelfAttention(dim, dim_attn, dim_ffn, num_heads, num_buckets,
+                                   shared_pos, dropout)
+
+        if build_parallel and num_layers > 1:
+            max_workers = min((os.cpu_count() or 1), num_layers, 8)
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                blocks = list(executor.map(_create_block, range(num_layers)))
+        else:
+            blocks = [_create_block(i) for i in range(num_layers)]
+
+        self.blocks = nn.ModuleList(blocks)
         self.norm = T5LayerNorm(dim)
 
         # initialize weights
-        self.apply(init_weights)
+        if not skip_init:
+            self.apply(init_weights)
 
     def prepare_fp8(self, target_dtype=torch.bfloat16):
         """Prepare model for FP8 inference by keeping LayerNorm and Embeddings in target dtype"""
@@ -331,7 +344,9 @@ class T5Decoder(nn.Module):
                  num_layers,
                  num_buckets,
                  shared_pos=True,
-                 dropout=0.1):
+                 dropout=0.1,
+                 skip_init=False,
+                 build_parallel=False):
         super(T5Decoder, self).__init__()
         self.dim = dim
         self.dim_attn = dim_attn
@@ -347,14 +362,23 @@ class T5Decoder(nn.Module):
         self.pos_embedding = T5RelativeEmbedding(
             num_buckets, num_heads, bidirectional=False) if shared_pos else None
         self.dropout = nn.Dropout(dropout)
-        self.blocks = nn.ModuleList([
-            T5CrossAttention(dim, dim_attn, dim_ffn, num_heads, num_buckets,
-                             shared_pos, dropout) for _ in range(num_layers)
-        ])
+        def _create_block(_):
+            return T5CrossAttention(dim, dim_attn, dim_ffn, num_heads, num_buckets,
+                                    shared_pos, dropout)
+
+        if build_parallel and num_layers > 1:
+            max_workers = min((os.cpu_count() or 1), num_layers, 8)
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                blocks = list(executor.map(_create_block, range(num_layers)))
+        else:
+            blocks = [_create_block(i) for i in range(num_layers)]
+
+        self.blocks = nn.ModuleList(blocks)
         self.norm = T5LayerNorm(dim)
 
         # initialize weights
-        self.apply(init_weights)
+        if not skip_init:
+            self.apply(init_weights)
 
     def forward(self, ids, mask=None, encoder_states=None, encoder_mask=None):
         b, s = ids.size()
@@ -389,7 +413,9 @@ class T5Model(nn.Module):
                  decoder_layers,
                  num_buckets,
                  shared_pos=True,
-                 dropout=0.1):
+                 dropout=0.1,
+                 skip_init=False,
+                 build_parallel=False):
         super(T5Model, self).__init__()
         self.vocab_size = vocab_size
         self.dim = dim
@@ -404,14 +430,17 @@ class T5Model(nn.Module):
         self.token_embedding = nn.Embedding(vocab_size, dim)
         self.encoder = T5Encoder(self.token_embedding, dim, dim_attn, dim_ffn,
                                  num_heads, encoder_layers, num_buckets,
-                                 shared_pos, dropout)
+                                 shared_pos, dropout, skip_init=skip_init,
+                                 build_parallel=build_parallel)
         self.decoder = T5Decoder(self.token_embedding, dim, dim_attn, dim_ffn,
                                  num_heads, decoder_layers, num_buckets,
-                                 shared_pos, dropout)
+                                 shared_pos, dropout, skip_init=skip_init,
+                                 build_parallel=build_parallel)
         self.head = nn.Linear(dim, vocab_size, bias=False)
 
         # initialize weights
-        self.apply(init_weights)
+        if not skip_init:
+            self.apply(init_weights)
 
     def forward(self, encoder_ids, encoder_mask, decoder_ids, decoder_mask):
         x = self.encoder(encoder_ids, encoder_mask)
@@ -520,13 +549,20 @@ class T5EncoderModel:
         return [u[:v] for u, v in zip(context, seq_lens)]
 
     def _load_bf16_model(self, dtype, device, checkpoint_path):
+        load_start = time.perf_counter()
         model = umt5_xxl(
             encoder_only=True,
             return_tokenizer=False,
             dtype=dtype,
             device=device).eval().requires_grad_(False)
+        structure_time = time.perf_counter() - load_start
+        print(f"[T5 LOAD][BF16] Encoder structure created in {structure_time:.2f}s")
         logging.info(f'loading {checkpoint_path}')
+        weights_start = time.perf_counter()
         model.load_state_dict(torch.load(checkpoint_path, map_location='cpu'))
+        weights_time = time.perf_counter() - weights_start
+        total_time = time.perf_counter() - load_start
+        print(f"[T5 LOAD][BF16] Weights loaded in {weights_time:.2f}s (total {total_time:.2f}s)")
         return model
 
     def _load_fp8_model(self, dtype, device, checkpoint_path):
@@ -536,35 +572,46 @@ class T5EncoderModel:
         logging.info("Initializing T5 with Scaled FP8 Quantization (Musubi Tuner approach)")
         logging.info("=" * 80)
 
+        load_start = time.perf_counter()
         cache_path = self._get_fp8_cache_path(checkpoint_path)
 
         logging.info(f'Loading T5 model from {checkpoint_path} in bf16 on CPU...')
+        structure_start = time.perf_counter()
         model = umt5_xxl(
             encoder_only=True,
             return_tokenizer=False,
             dtype=dtype,
-            device='cpu').eval().requires_grad_(False)
+            device='cpu',
+            skip_init=True,
+            build_parallel=True).eval().requires_grad_(False)
+        structure_time = time.perf_counter() - structure_start
+        print(f"[T5 LOAD][FP8] Encoder structure created in {structure_time:.2f}s")
 
         if cache_path and os.path.exists(cache_path):
-            logging.info(f"Detected cached FP8 checkpoint: {cache_path}")
+            print(f"[FP8 CACHE] Found cached FP8 checkpoint: {cache_path}")
             try:
-                state_dict = load_file(cache_path)
-                self._ensure_fp8_buffers(model, state_dict)
-                missing, unexpected = model.load_state_dict(state_dict, strict=False)
-                if missing:
-                    logging.warning(f"Missing keys when loading cached FP8 checkpoint: {missing}")
-                if unexpected:
-                    logging.warning(f"Unexpected keys when loading cached FP8 checkpoint: {unexpected}")
-                model = model.to(device)
-                model = apply_fp8_monkey_patch(model)
-                model.prepare_fp8(dtype)
-                logging.info("Loaded FP8 T5 encoder from cached checkpoint successfully")
-                return model
+                cache_load_start = time.perf_counter()
+                model = self._load_from_cached_fp8(model, cache_path, device, dtype, apply_fp8_monkey_patch)
+                if model is not None:
+                    print("[FP8 CACHE] Loaded cached FP8 T5 encoder successfully")
+                    cache_total = time.perf_counter() - cache_load_start
+                    total_time = time.perf_counter() - load_start
+                    print(f"[T5 LOAD][FP8] Cached weights applied in {cache_total:.2f}s (total {total_time:.2f}s)")
+                    return model
             except Exception as load_err:
                 logging.warning(f"Failed to load cached FP8 checkpoint ({load_err}). Rebuilding FP8 weights...")
+                print(f"[FP8 CACHE] Failed to load cached FP8 checkpoint ({load_err}). Regenerating...")
+        else:
+            if cache_path:
+                print(f"[FP8 CACHE] Cached FP8 checkpoint not found at {cache_path}")
+            else:
+                print("[FP8 CACHE] Cache path could not be determined; proceeding with FP8 conversion")
 
+        weights_start = time.perf_counter()
         model.load_state_dict(torch.load(checkpoint_path, map_location='cpu'))
         logging.info("Model loaded in bf16 on CPU")
+        weights_time = time.perf_counter() - weights_start
+        print(f"[T5 LOAD][FP8] BF16 weights loaded from disk in {weights_time:.2f}s")
 
         logging.info(f"Moving model to {device}...")
         model = model.to(device)
@@ -577,13 +624,22 @@ class T5EncoderModel:
             vram_before = None
 
         logging.info("Quantizing Linear layer weights to FP8 with per-block scaling...")
+        quant_start = time.perf_counter()
         model, fp8_info = optimize_t5_to_fp8(model, device=device, block_size=64)
+        quant_time = time.perf_counter() - quant_start
+        print(f"[T5 LOAD][FP8] FP8 quantization completed in {quant_time:.2f}s")
 
         logging.info("Applying FP8 forward pass monkey patches...")
+        patch_start = time.perf_counter()
         model = apply_fp8_monkey_patch(model)
+        patch_time = time.perf_counter() - patch_start
+        print(f"[T5 LOAD][FP8] FP8 monkey patching completed in {patch_time:.2f}s")
 
         logging.info("Ensuring LayerNorm and Embeddings remain in bf16...")
+        prep_start = time.perf_counter()
         model.prepare_fp8(dtype)
+        prep_time = time.perf_counter() - prep_start
+        print(f"[T5 LOAD][FP8] FP8 layer prep completed in {prep_time:.2f}s")
 
         if cuda_device is not None and torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -599,14 +655,21 @@ class T5EncoderModel:
             logging.info("=" * 80)
 
         if cache_path:
+            save_start = time.perf_counter()
             self._save_fp8_checkpoint(model, cache_path)
+            save_time = time.perf_counter() - save_start
+            print(f"[T5 LOAD][FP8] Cached FP8 checkpoint written in {save_time:.2f}s")
+
+        total_time = time.perf_counter() - load_start
+        print(f"[T5 LOAD][FP8] Total FP8 load time {total_time:.2f}s")
 
         return model
 
     def _get_fp8_cache_path(self, checkpoint_path):
         if not checkpoint_path:
             return None
-        ckpt_dir = os.path.dirname(checkpoint_path)
+        abs_checkpoint = os.path.abspath(checkpoint_path)
+        ckpt_dir = os.path.dirname(abs_checkpoint)
         if not ckpt_dir:
             return None
         return os.path.join(ckpt_dir, "models_t5_umt5-xxl-enc-fp8_scaled.safetensors")
@@ -619,8 +682,10 @@ class T5EncoderModel:
             save_file(state, tmp_path)
             os.replace(tmp_path, cache_path)
             logging.info(f"Saved FP8 T5 checkpoint to {cache_path}")
+            print(f"[FP8 CACHE] Saved FP8 T5 checkpoint to {cache_path}")
         except Exception as save_err:
             logging.warning(f"Failed to save FP8 checkpoint at {cache_path}: {save_err}")
+            print(f"[FP8 CACHE] Failed to save FP8 checkpoint at {cache_path}: {save_err}")
 
     def _ensure_fp8_buffers(self, model, state_dict):
         module_map = dict(model.named_modules())
@@ -640,3 +705,37 @@ class T5EncoderModel:
             if device.startswith('cuda'):
                 return torch.device(device)
         return None
+
+    def _load_from_cached_fp8(self, model, cache_path, device, dtype, apply_fp8_monkey_patch_fn):
+        load_start = time.perf_counter()
+        state_dict = load_file(cache_path)
+        load_time = time.perf_counter() - load_start
+        print(f"[T5 LOAD][FP8] Cached weights file read in {load_time:.2f}s")
+        self._ensure_fp8_buffers(model, state_dict)
+
+        apply_start = time.perf_counter()
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        apply_time = time.perf_counter() - apply_start
+        print(f"[T5 LOAD][FP8] Cached weights applied to model in {apply_time:.2f}s")
+        if missing:
+            logging.warning(f"Missing keys when loading cached FP8 checkpoint: {missing}")
+            print(f"[FP8 CACHE] Missing keys when loading cached FP8 checkpoint: {missing}")
+        if unexpected:
+            logging.warning(f"Unexpected keys when loading cached FP8 checkpoint: {unexpected}")
+            print(f"[FP8 CACHE] Unexpected keys when loading cached FP8 checkpoint: {unexpected}")
+
+        model = model.to(device)
+        move_time = time.perf_counter() - apply_start
+        print(f"[T5 LOAD][FP8] Cached model moved to device in {move_time:.2f}s")
+
+        monkey_patch_start = time.perf_counter()
+        model = apply_fp8_monkey_patch_fn(model)
+        monkey_patch_time = time.perf_counter() - monkey_patch_start
+        print(f"[T5 LOAD][FP8] Cached model monkey patching in {monkey_patch_time:.2f}s")
+
+        prepare_start = time.perf_counter()
+        model.prepare_fp8(dtype)
+        prepare_time = time.perf_counter() - prepare_start
+        print(f"[T5 LOAD][FP8] Cached model layer prep in {prepare_time:.2f}s")
+
+        return model
