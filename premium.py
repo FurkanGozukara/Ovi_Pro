@@ -962,7 +962,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                                 value=50,
                                 label="Sample Steps",
                                 precision=0,
-                                minimum=20,
+                                minimum=1,
                                 maximum=100,
                                 info="Higher values = better quality but slower"
                             )
