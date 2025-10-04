@@ -1021,6 +1021,23 @@ class Wan2_2_VAE:
                 temperal_downsample=temperal_downsample,
             ).eval().requires_grad_(False).to(device))
 
+    def to(self, device):
+        device = device if isinstance(device, torch.device) else torch.device(device)
+        self.model = self.model.to(device)
+        self.scale = [t.to(device) if isinstance(t, torch.Tensor) else t for t in self.scale]
+        self.device = device
+        return self
+
+    def cpu(self):
+        return self.to(torch.device('cpu'))
+
+    def cuda(self, device=None):
+        if device is None:
+            target = torch.device('cuda')
+        else:
+            target = device if isinstance(device, torch.device) else torch.device(device)
+        return self.to(target)
+
     def encode(self, videos):
         try:
             if not isinstance(videos, list):

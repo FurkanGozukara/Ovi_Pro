@@ -48,6 +48,25 @@ class FeaturesUtils(nn.Module):
                                         mode=mode,
                                         need_vae_encoder=need_vae_encoder)
 
+    def to(self, device):
+        device = device if isinstance(device, torch.device) else torch.device(device)
+        super().to(device)
+        if isinstance(self.mel_converter, nn.Module):
+            self.mel_converter.to(device)
+        if self.tod is not None:
+            self.tod = self.tod.to(device)
+        return self
+
+    def cpu(self):
+        return self.to(torch.device('cpu'))
+
+    def cuda(self, device=None):
+        if device is None:
+            target = torch.device('cuda')
+        else:
+            target = device if isinstance(device, torch.device) else torch.device(device)
+        return self.to(target)
+
     def compile(self):
 
         self.decode = torch.compile(self.decode)

@@ -49,6 +49,7 @@ class OviFusionEngine:
         self.video_latent_channel = None
         self.audio_latent_length = 157
         self.video_latent_length = 31
+        self._vae_device = None
         
         # T5 configuration (set during first generation)
         self.fp8_t5 = False
@@ -186,6 +187,9 @@ class OviFusionEngine:
             vae_model_audio = init_mmaudio_vae(self.config.ckpt_dir, rank=device_idx)
             vae_model_audio.requires_grad_(False).eval()
             self.vae_model_audio = vae_model_audio.bfloat16()
+
+        if self.cpu_offload:
+            self._offload_vaes_to_cpu()
 
     def _load_models(self, no_block_prep=False, load_text_encoder=True):
         """Lazy load the heavy models on first generation request"""
@@ -488,11 +492,14 @@ class OviFusionEngine:
                 else:
                     print(f"Pure T2V mode: calculated video latent size: {video_latent_h} x {video_latent_w}")
 
-            if is_i2v:              
+            if is_i2v:
                 with torch.no_grad():
+                    self._ensure_vaes_on_device(self.device)
                     latents_images = self.vae_model_video.wrapped_encode(first_frame[:, :, None]).to(self.target_dtype).squeeze(0) # c 1 h w 
                 latents_images = latents_images.to(self.target_dtype)
                 video_latent_h, video_latent_w = latents_images.shape[2], latents_images.shape[3]
+                if self.cpu_offload:
+                    self._offload_vaes_to_cpu()
 
             video_noise = torch.randn((self.video_latent_channel, self.video_latent_length, video_latent_h, video_latent_w), device=self.device, dtype=self.target_dtype, generator=torch.Generator(device=self.device).manual_seed(seed))  # c, f, h, w
             audio_noise = torch.randn((self.audio_latent_length, self.audio_latent_channel), device=self.device, dtype=self.target_dtype, generator=torch.Generator(device=self.device).manual_seed(seed))  # 1, l c -> l, c
@@ -588,16 +595,20 @@ class OviFusionEngine:
                 if is_i2v:
                     video_noise[:, :1] = latents_images
 
+                self._ensure_vaes_on_device(self.device)
+
                 # Decode audio
                 audio_latents_for_vae = audio_noise.unsqueeze(0).transpose(1, 2)  # 1, c, l
                 generated_audio = self.vae_model_audio.wrapped_decode(audio_latents_for_vae)
                 generated_audio = generated_audio.squeeze().cpu().float().numpy()
-                
+
                 # Decode video  
                 video_latents_for_vae = video_noise.unsqueeze(0)  # 1, c, f, h, w
                 generated_video = self.vae_model_video.wrapped_decode(video_latents_for_vae)
                 generated_video = generated_video.squeeze(0).cpu().float().numpy()  # c, f, h, w
-            
+                if self.cpu_offload:
+                    self._offload_vaes_to_cpu()
+
             return generated_video, generated_audio, image
 
 
@@ -607,10 +618,37 @@ class OviFusionEngine:
             
     def offload_to_cpu(self, model):
         model = model.cpu()
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
 
         return model
+
+    def _offload_vaes_to_cpu(self):
+        if self.vae_model_video is not None:
+            self.vae_model_video.cpu()
+        if self.vae_model_audio is not None:
+            self.vae_model_audio.cpu()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+        self._vae_device = torch.device('cpu')
+
+    def _ensure_vaes_on_device(self, device):
+        target_device = torch.device(device) if not isinstance(device, torch.device) else device
+        if self._vae_device == target_device:
+            return
+        if target_device.type == 'cpu':
+            if self.vae_model_video is not None:
+                self.vae_model_video.cpu()
+            if self.vae_model_audio is not None:
+                self.vae_model_audio.cpu()
+        else:
+            if self.vae_model_video is not None:
+                self.vae_model_video.cuda(target_device)
+            if self.vae_model_audio is not None:
+                self.vae_model_audio.cuda(target_device)
+        self._vae_device = target_device
 
     def get_scheduler_time_steps(self, sampling_steps, solver_name='unipc', device=0, shift=5.0):
         torch.manual_seed(4)
