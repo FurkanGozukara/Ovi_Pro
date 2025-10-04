@@ -528,7 +528,17 @@ def get_available_presets():
         for file in os.listdir(presets_dir):
             if file.endswith('.json'):
                 presets.append(file[:-5])  # Remove .json extension
-    return sorted(presets)
+
+    # Sort presets by VRAM size (natural sort for numbers)
+    def sort_key(preset_name):
+        import re
+        # Extract number from preset name (e.g., "6-GB GPUs" -> 6)
+        match = re.search(r'(\d+)', preset_name)
+        if match:
+            return int(match.group(1))
+        return 0
+
+    return sorted(presets, key=sort_key)
 
 def save_preset(preset_name, current_preset,
                 # All UI parameters
@@ -670,7 +680,7 @@ def load_preset(preset_name):
         return [gr.update() for _ in range(30)] + [gr.update(value=None)] + [f"Error loading preset: {e}"]
 
 def initialize_app_with_auto_load():
-    """Initialize app with preset dropdown choices and auto-load last preset."""
+    """Initialize app with preset dropdown choices and auto-load last preset or VRAM-based preset."""
     try:
         presets = get_available_presets()
         dropdown_update = gr.update(choices=presets, value=None)
@@ -690,14 +700,46 @@ def initialize_app_with_auto_load():
                 # Return dropdown with selected preset + all loaded UI values
                 return gr.update(choices=presets, value=last_preset), *loaded_values[:-1], f"Auto-loaded preset '{last_preset}'"
             else:
-                print(f"Last used preset '{last_preset}' not found, starting with empty selection")
+                print(f"Last used preset '{last_preset}' not found, selecting VRAM-based preset")
 
-        # No preset to auto-load - check VRAM and apply optimizations
-        print("No preset auto-loaded - checking GPU VRAM for automatic optimizations...")
+        # No last used preset - detect VRAM and select best matching preset
+        gpu_name, vram_gb = detect_gpu_info()
+
+        if vram_gb > 0 and presets:
+            # Find VRAM-based presets (those with "GB" in the name)
+            vram_presets = [p for p in presets if 'GB' in p and any(char.isdigit() for char in p)]
+
+            if vram_presets:
+                # Extract VRAM values from preset names and find the best match
+                import re
+                best_preset = None
+                best_vram_diff = float('inf')
+
+                for preset in vram_presets:
+                    match = re.search(r'(\d+)', preset)
+                    if match:
+                        preset_vram = int(match.group(1))
+                        vram_diff = abs(vram_gb - preset_vram)  # Use absolute difference for closest match
+
+                        if vram_diff < best_vram_diff:
+                            best_vram_diff = vram_diff
+                            best_preset = preset
+
+                if best_preset:
+                    print(f"Auto-loading VRAM-based preset: {best_preset} (detected {vram_gb:.1f}GB VRAM)")
+                    # Load the preset and update dropdown to select it
+                    loaded_values = load_preset(best_preset)
+                    # Return dropdown with selected preset + all loaded UI values
+                    return gr.update(choices=presets, value=best_preset), *loaded_values[:-1], f"Auto-loaded VRAM-optimized preset '{best_preset}' ({vram_gb:.1f}GB GPU detected)"
+                else:
+                    print(f"No suitable VRAM-based preset found for {vram_gb:.1f}GB VRAM")
+
+        # Fallback: No preset to auto-load - check VRAM and apply basic optimizations
+        print("No preset auto-loaded - applying basic VRAM optimizations...")
 
         gpu_name, vram_gb = detect_gpu_info()
 
-        # Apply VRAM-based optimizations
+        # Apply basic VRAM-based optimizations when no preset is loaded
         fp8_t5_update = gr.update()  # Default: False
         vae_tiled_decode_update = gr.update()  # Default: False
         clear_all_update = gr.update()  # Default: True
