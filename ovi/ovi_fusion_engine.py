@@ -704,6 +704,10 @@ class OviFusionEngine:
 
 
         except Exception as e:
+            # Re-raise cancellation exceptions to allow proper cancellation handling
+            if "cancelled by user" in str(e).lower():
+                raise e
+            # Only log actual errors, not cancellations
             logging.error(traceback.format_exc())
             return None
             
