@@ -694,16 +694,18 @@ def initialize_app_with_auto_load():
 
         # Apply VRAM-based optimizations
         fp8_t5_update = gr.update()  # Default: False
+        vae_tiled_decode_update = gr.update()  # Default: False
         clear_all_update = gr.update()  # Default: True
 
         optimization_messages = []
 
         if vram_gb > 0:
             if vram_gb < 23:
-                # Enable Scaled FP8 T5 for VRAM < 23GB
+                # Enable Scaled FP8 T5 and Tiled VAE for VRAM < 23GB
                 fp8_t5_update = gr.update(value=True)
-                optimization_messages.append(f"VRAM {vram_gb:.1f}GB < 23GB → Enabled Scaled FP8 T5")
-                print(f"  ✓ VRAM optimization: Enabled Scaled FP8 T5 (VRAM: {vram_gb:.1f}GB < 23GB)")
+                vae_tiled_decode_update = gr.update(value=True)
+                optimization_messages.append(f"VRAM {vram_gb:.1f}GB < 23GB → Enabled Scaled FP8 T5 + Tiled VAE")
+                print(f"  ✓ VRAM optimization: Enabled Scaled FP8 T5 + Tiled VAE (VRAM: {vram_gb:.1f}GB < 23GB)")
 
             if vram_gb > 40:
                 # Disable Clear All Memory for VRAM > 40GB
@@ -748,7 +750,7 @@ def initialize_app_with_auto_load():
             gr.update(),  # batch_output_folder
             gr.update(),  # batch_skip_existing
             clear_all_update,  # clear_all (potentially modified)
-            gr.update(),  # vae_tiled_decode
+            vae_tiled_decode_update,  # vae_tiled_decode (potentially modified)
             gr.update(),  # vae_tile_size
             gr.update(),  # vae_tile_overlap
             status_message  # status message
@@ -1366,6 +1368,30 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                                 info="Keep T5 on CPU and run inference on CPU (saves VRAM but slower encoding)"
                             )
 
+                        # VAE Tiled Decoding Controls
+                        with gr.Row():
+                            vae_tiled_decode = gr.Checkbox(
+                                label="Enable Tiled VAE Decode",
+                                value=False,
+                                info="✅ Process VAE decoding in tiles to save VRAM (recommended for <24GB VRAM)"
+                            )
+                            vae_tile_size = gr.Slider(
+                                minimum=12,
+                                maximum=64,
+                                value=32,
+                                step=8,
+                                label="Tile Size (Latent Space)",
+                                info="Spatial tile size: 12=max VRAM savings (slower), 32=balanced ⭐, 64=min savings (faster)"
+                            )
+                            vae_tile_overlap = gr.Slider(
+                                minimum=4,
+                                maximum=16,
+                                value=8,
+                                step=2,
+                                label="Tile Overlap",
+                                info="Overlap for seamless blending: 4=fast, 8=balanced ⭐, 16=best quality"
+                            )
+
                         # Negative prompts in same row, 3 lines each
                         with gr.Row():
                             video_negative_prompt = gr.Textbox(
@@ -1380,115 +1406,6 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                                 lines=3,
                                 value="robotic, muffled, echo, distorted"
                             )
-                        
-                        # VAE Tiled Decoding Options
-                        with gr.Accordion("🎨 VAE Tiled Decoding (Advanced VRAM Optimization)", open=False):
-                            gr.Markdown("""
-                            **VAE Tiled Decoding**: Process video decoding in overlapping spatial tiles to dramatically reduce VRAM usage.
-                            
-                            ### 🎯 What is Tiled VAE Decoding?
-                            The VAE decoder typically processes the entire video frame at once, which can consume 8-15GB of VRAM during decoding.
-                            Tiled decoding splits each frame into smaller overlapping tiles, processes them individually, and blends them seamlessly.
-                            
-                            ### 💡 How It Works:
-                            - **Spatial Tiling**: Splits each frame into smaller tiles (e.g., 32×32 in latent space)
-                            - **Overlap Blending**: Tiles overlap by a configurable amount for seamless transitions
-                            - **ComfyUI Technology**: Uses proven feathered blending from ComfyUI for invisible seams
-                            - **No Quality Loss**: Proper overlap ensures output is virtually identical to non-tiled
-                            
-                            ### ⚙️ Parameters Explained:
-                            
-                            **Tile Size** (in latent space):
-                            - Values are in **latent space**, not pixel space!
-                            - 1 latent unit = 16 pixels after VAE decode
-                            - Example: 32 latent = 512×512 pixels per tile
-                            - Smaller tiles = less VRAM but more processing time
-                            - Must be divisible by 8 for optimal performance
-                            
-                            **Tile Overlap** (in latent space):
-                            - How much tiles overlap for seamless blending
-                            - Higher overlap = better quality, more computation
-                            - Recommended: 25% of tile size (e.g., 8 for tile_size=32)
-                            - Creates feathered transitions to prevent visible seams
-                            
-                            ### 📊 Recommended Settings by VRAM:
-                            
-                            | VRAM | Tile Size | Overlap | VRAM Savings | Speed |
-                            |------|-----------|---------|--------------|-------|
-                            | **24GB+** | 64 | 16 | ~15% | Fastest |
-                            | **16-24GB** | 32 | 8 | ~30% | Fast ⭐ |
-                            | **12-16GB** | 24 | 6 | ~45% | Medium |
-                            | **8-12GB** | 16 | 4 | ~60% | Slower |
-                            | **<8GB** | 16 | 4 | ~60% | Slower |
-                            
-                            ⭐ = Recommended default (best balance)
-                            
-                            ### 🎬 Resolution Examples:
-                            
-                            **992×512 video (16:9 Landscape)**:
-                            - Latent size: 62×32
-                            - With tile_size=32, overlap=8: ~2×1 = 2 tiles per frame
-                            - VRAM saving: ~30% (12-15GB → 8-10GB during decode)
-                            
-                            **512×992 video (9:16 Portrait)**:
-                            - Latent size: 32×62
-                            - With tile_size=32, overlap=8: ~1×2 = 2 tiles per frame
-                            - VRAM saving: ~30%
-                            
-                            ### ⚠️ Important Notes:
-                            
-                            1. **Latent Space vs Pixel Space**: 
-                               - Tile size is in LATENT space (before VAE upscaling)
-                               - VAE upscales 16× → 32 latent = 512 pixels
-                            
-                            2. **Quality Impact**:
-                               - Proper overlap (≥25% of tile size) = no visible seams
-                               - Too little overlap = potential artifacts at tile boundaries
-                               - ComfyUI's feathered blending ensures seamless results
-                            
-                            3. **Performance**:
-                               - Smaller tiles = more tile processing overhead
-                               - But enables generation on lower VRAM GPUs
-                               - Decode time increases by ~20-50% depending on tile size
-                            
-                            4. **When to Use**:
-                               - ✅ Running out of VRAM during decode
-                               - ✅ Want to generate higher resolutions
-                               - ✅ Have limited GPU memory
-                               - ❌ Have plenty of VRAM (24GB+) and want max speed
-                            
-                            ### 🔬 Technical Details:
-                            
-                            - **Algorithm**: Universal N-dimensional tiled processing from ComfyUI
-                            - **Blending**: Feathered masks with linear gradients at tile boundaries
-                            - **Memory**: Only loads one tile into VRAM at a time
-                            - **Output**: Bit-identical to non-tiled (with proper overlap)
-                            
-                            **Try it!** Enable tiled decoding below and compare VRAM usage in your task manager.
-                            """)
-                            
-                            with gr.Row():
-                                vae_tiled_decode = gr.Checkbox(
-                                    label="Enable Tiled VAE Decode",
-                                    value=False,
-                                    info="✅ Process VAE decoding in tiles to save VRAM (recommended for <24GB VRAM)"
-                                )
-                                vae_tile_size = gr.Slider(
-                                    minimum=16,
-                                    maximum=64,
-                                    value=32,
-                                    step=8,
-                                    label="Tile Size (Latent Space)",
-                                    info="Spatial tile size: 16=max VRAM savings (slower), 32=balanced ⭐, 64=min savings (faster)"
-                                )
-                                vae_tile_overlap = gr.Slider(
-                                    minimum=4,
-                                    maximum=16,
-                                    value=8,
-                                    step=2,
-                                    label="Tile Overlap",
-                                    info="Overlap for seamless blending: 4=fast, 8=balanced ⭐, 16=best quality"
-                                )
 
                 with gr.Column():
                     output_path = gr.Video(label="Generated Video")
@@ -1694,6 +1611,95 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                         - **Iterate**: Adjust one parameter at a time
                         - **Save Good Seeds**: Note what works for you
                         - **Batch Process**: Use multiple prompts for testing
+                        """
+                    )
+
+                with gr.Column():
+                    gr.Markdown(
+                        """
+                        ## 🎨 VAE Tiled Decoding (Advanced VRAM Optimization)
+
+                        **VAE Tiled Decoding**: Process video decoding in overlapping spatial tiles to dramatically reduce VRAM usage.
+
+                        ### 🎯 What is Tiled VAE Decoding?
+                        The VAE decoder typically processes the entire video frame at once, which can consume 8-15GB of VRAM during decoding.
+                        Tiled decoding splits each frame into smaller overlapping tiles, processes them individually, and blends them seamlessly.
+
+                        ### 💡 How It Works:
+                        - **Spatial Tiling**: Splits each frame into smaller tiles (e.g., 32×32 in latent space)
+                        - **Overlap Blending**: Tiles overlap by a configurable amount for seamless transitions
+                        - **ComfyUI Technology**: Uses proven feathered blending from ComfyUI for invisible seams
+                        - **No Quality Loss**: Proper overlap ensures output is virtually identical to non-tiled
+
+                        ### ⚙️ Parameters Explained:
+
+                        **Tile Size** (in latent space):
+                        - Values are in **latent space**, not pixel space!
+                        - 1 latent unit = 16 pixels after VAE decode
+                        - Example: 32 latent = 512×512 pixels per tile
+                        - Smaller tiles = less VRAM but more processing time
+                        - Must be divisible by 8 for optimal performance
+
+                        **Tile Overlap** (in latent space):
+                        - How much tiles overlap for seamless blending
+                        - Higher overlap = better quality, more computation
+                        - Recommended: 25% of tile size (e.g., 8 for tile_size=32)
+                        - Creates feathered transitions to prevent visible seams
+
+                        ### 📊 Recommended Settings by VRAM:
+
+                        | VRAM | Tile Size | Overlap | VRAM Savings | Speed |
+                        |------|-----------|---------|--------------|-------|
+                        | **24GB+** | 64 | 16 | ~15% | Fastest |
+                        | **16-24GB** | 32 | 8 | ~30% | Fast ⭐ |
+                        | **12-16GB** | 24 | 6 | ~45% | Medium |
+                        | **8-12GB** | 16 | 4 | ~60% | Slower |
+                        | **<8GB** | 16 | 4 | ~60% | Slower |
+
+                        ⭐ = Recommended default (best balance)
+
+                        ### 🎬 Resolution Examples:
+
+                        **992×512 video (16:9 Landscape)**:
+                        - Latent size: 62×32
+                        - With tile_size=32, overlap=8: ~2×1 = 2 tiles per frame
+                        - VRAM saving: ~30% (12-15GB → 8-10GB during decode)
+
+                        **512×992 video (9:16 Portrait)**:
+                        - Latent size: 32×62
+                        - With tile_size=32, overlap=8: ~1×2 = 2 tiles per frame
+                        - VRAM saving: ~30%
+
+                        ### ⚠️ Important Notes:
+
+                        1. **Latent Space vs Pixel Space**:
+                           - Tile size is in LATENT space (before VAE upscaling)
+                           - VAE upscales 16× → 32 latent = 512 pixels
+
+                        2. **Quality Impact**:
+                           - Proper overlap (≥25% of tile size) = no visible seams
+                           - Too little overlap = potential artifacts at tile boundaries
+                           - ComfyUI's feathered blending ensures seamless results
+
+                        3. **Performance**:
+                           - Smaller tiles = more tile processing overhead
+                           - But enables generation on lower VRAM GPUs
+                           - Decode time increases by ~20-50% depending on tile size
+
+                        4. **When to Use**:
+                           - ✅ Running out of VRAM during decode
+                           - ✅ Want to generate higher resolutions
+                           - ✅ Have limited GPU memory
+                           - ❌ Have plenty of VRAM (24GB+) and want max speed
+
+                        ### 🔬 Technical Details:
+
+                        - **Algorithm**: Universal N-dimensional tiled processing from ComfyUI
+                        - **Blending**: Feathered masks with linear gradients at tile boundaries
+                        - **Memory**: Only loads one tile into VRAM at a time
+                        - **Output**: Bit-identical to non-tiled (with proper overlap)
+
+                        **Try it!** Enable tiled decoding in the Generate tab and compare VRAM usage in your task manager.
                         """
                     )
 
