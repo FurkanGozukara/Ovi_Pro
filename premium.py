@@ -3,6 +3,7 @@ import torch
 import argparse
 import os
 import sys
+import signal
 from datetime import datetime
 
 print(f"[DEBUG] Starting premium.py with args: {sys.argv}")
@@ -121,6 +122,10 @@ def run_generation_subprocess(params):
     import json
     import os
     import tempfile
+    import time
+
+    process = None
+    temp_file = None
 
     try:
         # Get the current script path and venv
@@ -156,25 +161,93 @@ def run_generation_subprocess(params):
         print(f"[SUBPROCESS] Command: {' '.join(cmd_args)}")
         print(f"[SUBPROCESS] Params file: {temp_file}")
 
-        # Run the subprocess directly
-        result = subprocess.run(cmd_args, cwd=script_dir)
+        # Run the subprocess with Popen for better control
+        process = subprocess.Popen(
+            cmd_args,
+            cwd=script_dir,
+            stdout=None,  # Let subprocess handle its own output
+            stderr=None
+        )
+
+        # Wait for completion while checking for cancellation
+        while process.poll() is None:
+            global cancel_generation
+            if cancel_generation:
+                print("[SUBPROCESS] Cancellation requested - terminating subprocess...")
+                process.terminate()
+
+                # Give it a moment to terminate gracefully
+                try:
+                    process.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    print("[SUBPROCESS] Subprocess didn't terminate gracefully, killing...")
+                    process.kill()
+                    try:
+                        process.wait(timeout=2.0)
+                    except subprocess.TimeoutExpired:
+                        print("[SUBPROCESS] Failed to kill subprocess")
+
+                # Clean up temp file
+                try:
+                    if temp_file and os.path.exists(temp_file):
+                        os.unlink(temp_file)
+                except:
+                    pass
+
+                print("[SUBPROCESS] Subprocess cancelled")
+                raise Exception("Generation cancelled by user")
+
+            # Sleep briefly to avoid busy waiting
+            time.sleep(0.1)
+
+        # Get the return code
+        return_code = process.returncode
 
         # Clean up temp file
         try:
-            os.unlink(temp_file)
+            if temp_file and os.path.exists(temp_file):
+                os.unlink(temp_file)
         except:
             pass
 
-        if result.returncode == 0:
+        if return_code == 0:
             print("[SUBPROCESS] Generation completed successfully")
             return True
+        elif return_code == -signal.SIGTERM or return_code == 1:  # SIGTERM or general error
+            if cancel_generation:
+                print("[SUBPROCESS] Subprocess was cancelled")
+                return False
+            else:
+                print(f"[SUBPROCESS] Generation failed with return code: {return_code}")
+                return False
         else:
-            print(f"[SUBPROCESS] Generation failed with return code: {result.returncode}")
+            print(f"[SUBPROCESS] Generation failed with return code: {return_code}")
             return False
 
     except Exception as e:
-        print(f"[SUBPROCESS] Error running subprocess: {e}")
-        return False
+        error_msg = str(e)
+        if "cancelled by user" in error_msg.lower():
+            # Re-raise cancellation exceptions
+            raise e
+        else:
+            print(f"[SUBPROCESS] Error running subprocess: {e}")
+            # Clean up process if it exists
+            if process and process.poll() is None:
+                try:
+                    process.terminate()
+                    process.wait(timeout=2.0)
+                except:
+                    try:
+                        process.kill()
+                    except:
+                        pass
+            # Clean up temp file
+            try:
+                if temp_file and os.path.exists(temp_file):
+                    os.unlink(temp_file)
+            except:
+                pass
+            return False
 
 share_enabled = args.share
 print(f"Starting Gradio interface with lazy loading... Share mode: {'ENABLED' if share_enabled else 'DISABLED (local only)'}")
@@ -217,9 +290,11 @@ def generate_video(
 
     print(f"[GENERATE_VIDEO] Called with clear_all={clear_all}, num_generations={num_generations}")
 
+    # Reset cancellation flag at the start of each generation request
+    reset_cancellation()
+
     try:
-        # Check for cancellation at the start
-        check_cancellation()
+        # No need to check cancellation at the start since we just reset it
 
         # Only initialize engine if we're not using subprocess mode (clear_all=False)
         # When clear_all=True, all generations run in subprocesses, so main process doesn't need models
@@ -282,6 +357,9 @@ def generate_video(
 
             print(f"\n[GENERATION {gen_idx + 1}/{int(num_generations)}] Starting with seed: {current_seed}")
 
+            # Check for cancellation again after setup
+            check_cancellation()
+
             if clear_all:
                 # Run this generation in a subprocess for memory cleanup
                 single_gen_params = {
@@ -316,10 +394,7 @@ def generate_video(
                         'vae_tile_overlap': vae_tile_overlap,
                     }
 
-                success = run_generation_subprocess(single_gen_params)
-                if not success:
-                    print(f"[GENERATION {gen_idx + 1}/{int(num_generations)}] Failed in subprocess")
-                    continue
+                run_generation_subprocess(single_gen_params)
 
                 # Find the generated file (should be the most recent in outputs)
                 outputs_dir = args.output_dir if args.output_dir else os.path.join(os.path.dirname(__file__), "outputs")
@@ -335,7 +410,9 @@ def generate_video(
                     continue
 
             # Original generation logic (when clear_all is disabled)
-            generated_video, generated_audio, _ = ovi_engine.generate(
+            # Use cancellable generation wrapper for interruptible generation
+            generated_video, generated_audio, _ = generate_with_cancellation_check(
+                ovi_engine.generate,
                 text_prompt=text_prompt,
                 image_path=image_path,
                 video_frame_height_width=[video_frame_height, video_frame_width],
@@ -406,8 +483,14 @@ def generate_video(
 
         return last_output_path
     except Exception as e:
-        print(f"Error during video generation: {e}")
-        return None
+        error_msg = str(e)
+        if "cancelled by user" in error_msg.lower():
+            print("Generation cancelled by user")
+            reset_cancellation()  # Reset the cancellation flag
+            return None
+        else:
+            print(f"Error during video generation: {e}")
+            return None
 
 
 
@@ -511,8 +594,45 @@ def check_cancellation():
     """Check if cancellation has been requested."""
     global cancel_generation
     if cancel_generation:
-        cancel_generation = False  # Reset for next generation
+        # Don't reset the flag here - let the caller handle it
         raise Exception("Generation cancelled by user")
+
+def reset_cancellation():
+    """Reset the cancellation flag after handling cancellation."""
+    global cancel_generation
+    cancel_generation = False
+
+def generate_with_cancellation_check(generate_func, **kwargs):
+    """Run generation function with periodic cancellation checks."""
+    import threading
+    import time
+
+    result = [None]  # Use list to store result from thread
+    exception = [None]  # Use list to store exception from thread
+    generation_thread = None
+
+    def generation_worker():
+        """Worker function that runs the generation."""
+        try:
+            result[0] = generate_func(**kwargs)
+        except Exception as e:
+            exception[0] = e
+
+    # Start generation in a separate thread
+    generation_thread = threading.Thread(target=generation_worker, daemon=True)
+    generation_thread.start()
+
+    # Wait for completion while checking for cancellation
+    while generation_thread.is_alive():
+        # Check for cancellation every 0.5 seconds
+        time.sleep(0.5)
+        check_cancellation()
+
+    # Check if an exception occurred in the thread
+    if exception[0]:
+        raise exception[0]
+
+    return result[0]
 
 def get_presets_dir():
     """Get the presets directory path."""
@@ -1095,7 +1215,9 @@ def process_batch_generation(
 
                 # Original batch generation logic (when clear_all is disabled)
                 try:
-                    generated_video, generated_audio, _ = ovi_engine.generate(
+                    # Use cancellable generation wrapper for interruptible generation
+                    generated_video, generated_audio, _ = generate_with_cancellation_check(
+                        ovi_engine.generate,
                         text_prompt=text_prompt,
                         image_path=image_path,
                         video_frame_height_width=[video_frame_height, video_frame_width],
@@ -1177,8 +1299,14 @@ def process_batch_generation(
         return last_output_path
 
     except Exception as e:
-        print(f"[BATCH ERROR] {e}")
-        return None
+        error_msg = str(e)
+        if "cancelled by user" in error_msg.lower():
+            print("[BATCH] Batch processing cancelled by user")
+            reset_cancellation()  # Reset the cancellation flag
+            return None
+        else:
+            print(f"[BATCH ERROR] {e}")
+            return None
 
 def load_i2v_example_with_resolution(prompt, img_path):
     """Load I2V example and set appropriate resolution based on image aspect ratio."""
