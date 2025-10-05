@@ -83,12 +83,82 @@ class OviFusionEngine:
         if self.blocks_to_swap > 0:
             logging.info(f"  Block swap will keep {self.blocks_to_swap} transformer blocks on CPU, loading only active blocks to GPU during inference")
 
-    def _encode_text_and_cleanup(self, text_prompt, video_negative_prompt, audio_negative_prompt, delete_text_encoder=True):
+    def _encode_text_and_cleanup(self, text_prompt, video_negative_prompt, audio_negative_prompt, delete_text_encoder=True, use_subprocess=True):
         """
         Encode text prompts and optionally delete T5 to save VRAM during generation.
         This is the FIRST operation after loading models.
         Uses instance variables self.fp8_t5 and self.cpu_only_t5 for configuration.
+        
+        Args:
+            text_prompt: Positive text prompt
+            video_negative_prompt: Negative prompt for video
+            audio_negative_prompt: Negative prompt for audio
+            delete_text_encoder: If True, delete T5 after encoding to save memory
+            use_subprocess: If True and delete_text_encoder=True, run T5 encoding in subprocess for 100% guaranteed memory cleanup
         """
+        # CRITICAL: Only use subprocess if no other heavy models are loaded yet
+        # This prevents duplicate memory usage (T5 in subprocess + fusion model in main process)
+        can_use_subprocess = (
+            delete_text_encoder and 
+            use_subprocess and 
+            self.model is None and  # Fusion model not loaded yet
+            self.text_model is None  # T5 not already loaded
+        )
+        
+        if can_use_subprocess:
+            print("=" * 80)
+            print("T5 SUBPROCESS MODE ENABLED (FIRST GENERATION)")
+            print("Running T5 encoding in separate process for 100% guaranteed memory cleanup")
+            print("No other models loaded yet - optimal for subprocess isolation")
+            print("=" * 80)
+            
+            # Import the subprocess function from premium.py
+            # We do this dynamically to avoid circular imports
+            try:
+                # Try to import from the parent directory (where premium.py is)
+                import sys
+                import os
+                parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                if parent_dir not in sys.path:
+                    sys.path.insert(0, parent_dir)
+                
+                from premium import run_t5_encoding_subprocess
+                
+                # Run T5 encoding in subprocess - returns embeddings as CPU tensors
+                text_embeddings_cpu = run_t5_encoding_subprocess(
+                    text_prompt=text_prompt,
+                    video_negative_prompt=video_negative_prompt,
+                    audio_negative_prompt=audio_negative_prompt,
+                    fp8_t5=self.fp8_t5,
+                    cpu_only_t5=self.cpu_only_t5
+                )
+                
+                # Move embeddings to target device and dtype
+                text_embeddings = [emb.to(self.target_dtype).to(self.device) for emb in text_embeddings_cpu]
+                
+                # No need to delete T5 - it was already deleted in the subprocess
+                # OS has freed ALL T5 memory automatically when subprocess exited
+                print("=" * 80)
+                print("T5 SUBPROCESS COMPLETED")
+                print("T5 memory fully reclaimed by OS - 100% cleanup guaranteed")
+                print("=" * 80)
+                
+                return text_embeddings
+                
+            except Exception as e:
+                print(f"[WARNING] T5 subprocess mode failed: {e}")
+                print("[WARNING] Falling back to in-process T5 encoding with manual deletion")
+                # Fall back to regular in-process encoding
+                use_subprocess = False
+        elif delete_text_encoder and use_subprocess and self.model is not None:
+            # Models already loaded - subprocess would cause duplicate memory usage
+            print("=" * 80)
+            print("T5 IN-PROCESS MODE (SUBSEQUENT GENERATION)")
+            print("Fusion model already loaded - using in-process T5 encoding to avoid duplicate memory usage")
+            print("Subprocess mode only used on first generation when no models are loaded")
+            print("=" * 80)
+        
+        # Original in-process encoding logic (fallback or when subprocess is disabled)
         # Check if T5 needs to be reloaded (was deleted in previous generation)
         if self.text_model is None:
             device_idx = self.device if isinstance(self.device, int) else (self.device.index if self.device.index is not None else 0)
@@ -503,7 +573,8 @@ class OviFusionEngine:
                     vae_tile_size=32,
                     vae_tile_overlap=8,
                     force_exact_resolution=False,
-                    cancellation_check=None
+                    cancellation_check=None,
+                    text_embeddings_cache=None  # Pre-encoded text embeddings from T5 subprocess
                 ):
 
         # ===================================================================
@@ -523,30 +594,51 @@ class OviFusionEngine:
         self.vae_tile_size = vae_tile_size
         self.vae_tile_overlap = vae_tile_overlap
         
-        # Step 1: Load ONLY T5 (or use existing if already loaded)
-        if self.text_model is None:
+        # Check if pre-encoded text embeddings are provided (from T5 subprocess)
+        if text_embeddings_cache is not None:
             print("=" * 80)
-            print("STEP 1/2: Loading T5 text encoder FIRST to minimize RAM usage")
+            print("USING PRE-ENCODED T5 EMBEDDINGS FROM SUBPROCESS")
+            print("Skipping T5 loading and encoding - embeddings already computed")
+            print(f"Embeddings type: {type(text_embeddings_cache)}, length: {len(text_embeddings_cache) if isinstance(text_embeddings_cache, list) else 'N/A'}")
             print("=" * 80)
-            self._load_models(no_block_prep=no_block_prep, load_text_encoder=True)
-            # At this point, ONLY T5 is loaded, fusion model is NOT loaded yet
-        
-        # Step 2: Encode text and optionally delete T5
-        print("=" * 80)
-        print("STEP 2/2: Encoding text and optionally deleting T5 before loading fusion model")
-        print("=" * 80)
-        text_embeddings = self._encode_text_and_cleanup(
-            text_prompt, 
-            video_negative_prompt, 
-            audio_negative_prompt, 
-            delete_text_encoder
-        )
-        
-        # Step 3: NOW load the fusion model (T5 is already deleted if enabled)
-        print("=" * 80)
-        print("STEP 3/3: Loading fusion model (T5 already deleted if enabled)")
-        print("=" * 80)
-        self._load_models(no_block_prep=no_block_prep, load_text_encoder=False)
+            
+            # Move embeddings to target device and dtype if needed
+            text_embeddings = [emb.to(self.target_dtype).to(self.device) for emb in text_embeddings_cache]
+            print(f"[DEBUG] Embeddings moved to device: {self.device}, dtype: {self.target_dtype}")
+            
+            # Directly load fusion model (skip T5 steps entirely)
+            print("=" * 80)
+            print("Loading fusion model (T5 subprocess already completed)")
+            print("T5 will NOT be loaded - using cached embeddings only")
+            print("=" * 80)
+            self._load_models(no_block_prep=no_block_prep, load_text_encoder=False)
+        else:
+            # Original T5 loading and encoding flow
+            print("[DEBUG] text_embeddings_cache is None - will load T5")
+            # Step 1: Load ONLY T5 (or use existing if already loaded)
+            if self.text_model is None:
+                print("=" * 80)
+                print("STEP 1/2: Loading T5 text encoder FIRST to minimize RAM usage")
+                print("=" * 80)
+                self._load_models(no_block_prep=no_block_prep, load_text_encoder=True)
+                # At this point, ONLY T5 is loaded, fusion model is NOT loaded yet
+            
+            # Step 2: Encode text and optionally delete T5
+            print("=" * 80)
+            print("STEP 2/2: Encoding text and optionally deleting T5 before loading fusion model")
+            print("=" * 80)
+            text_embeddings = self._encode_text_and_cleanup(
+                text_prompt, 
+                video_negative_prompt, 
+                audio_negative_prompt, 
+                delete_text_encoder
+            )
+            
+            # Step 3: NOW load the fusion model (T5 is already deleted if enabled)
+            print("=" * 80)
+            print("STEP 3/3: Loading fusion model (T5 already deleted if enabled)")
+            print("=" * 80)
+            self._load_models(no_block_prep=no_block_prep, load_text_encoder=False)
         
         # Split embeddings for later use
         text_embeddings_video_pos = text_embeddings[0]

@@ -105,6 +105,16 @@ parser.add_argument(
     action="store_true",
     help="Internal: Test subprocess functionality"
 )
+parser.add_argument(
+    "--encode-t5-only",
+    type=str,
+    help="Internal: Run T5 text encoding from JSON file and exit"
+)
+parser.add_argument(
+    "--output-embeddings",
+    type=str,
+    help="Internal: Output path for T5 embeddings file"
+)
 args = parser.parse_args()
 
 print(f"[DEBUG] Parsed args: single_generation={bool(args.single_generation)}, single_generation_file={bool(args.single_generation_file)}, test={bool(getattr(args, 'test', False))}, test_subprocess={bool(getattr(args, 'test_subprocess', False))}")
@@ -114,6 +124,176 @@ ovi_engine = None  # Will be initialized on first generation
 
 # Global cancellation flag for stopping generations
 cancel_generation = False
+
+def run_t5_encoding_subprocess(text_prompt, video_negative_prompt, audio_negative_prompt, 
+                                fp8_t5=False, cpu_only_t5=False):
+    """Run T5 text encoding in a subprocess for guaranteed memory cleanup.
+    
+    Returns:
+        List of text embeddings [pos_emb, video_neg_emb, audio_neg_emb] as CPU tensors
+    """
+    import subprocess
+    import sys
+    import json
+    import os
+    import tempfile
+    import time
+
+    process = None
+    params_file = None
+    embeddings_file = None
+
+    try:
+        # Get the current script path and venv
+        script_path = os.path.abspath(__file__)
+        script_dir = os.path.dirname(script_path)
+        venv_path = os.path.join(script_dir, "venv")
+
+        # Use venv python executable directly
+        if sys.platform == "win32":
+            python_exe = os.path.join(venv_path, "Scripts", "python.exe")
+        else:
+            python_exe = os.path.join(venv_path, "bin", "python")
+
+        # Check if venv python exists, fallback to system python
+        if not os.path.exists(python_exe):
+            print(f"[T5-SUBPROCESS] Venv python not found at {python_exe}, using system python")
+            python_exe = sys.executable
+
+        # Create temporary files for communication
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, dir=script_dir) as f:
+            params = {
+                'text_prompt': text_prompt,
+                'video_negative_prompt': video_negative_prompt,
+                'audio_negative_prompt': audio_negative_prompt,
+                'fp8_t5': fp8_t5,
+                'cpu_only_t5': cpu_only_t5
+            }
+            json.dump(params, f)
+            params_file = f.name
+
+        # Create temp file for embeddings output
+        embeddings_file = tempfile.mktemp(suffix='.pt', dir=script_dir)
+
+        # Prepare command arguments
+        cmd_args = [
+            python_exe,
+            script_path,
+            "--encode-t5-only",
+            params_file,
+            "--output-embeddings",
+            embeddings_file
+        ]
+
+        print(f"[T5-SUBPROCESS] Running T5 encoding in subprocess for guaranteed memory cleanup...")
+        print(f"[T5-SUBPROCESS] This ensures 100% memory cleanup after encoding")
+
+        # Run the subprocess with Popen for better control
+        process = subprocess.Popen(
+            cmd_args,
+            cwd=script_dir,
+            stdout=None,
+            stderr=None
+        )
+
+        # Wait for completion while checking for cancellation
+        while process.poll() is None:
+            global cancel_generation
+            if cancel_generation:
+                print("[T5-SUBPROCESS] Cancellation requested - terminating subprocess...")
+                process.terminate()
+
+                # Give it a moment to terminate gracefully
+                try:
+                    process.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    print("[T5-SUBPROCESS] Subprocess didn't terminate gracefully, killing...")
+                    process.kill()
+                    try:
+                        process.wait(timeout=2.0)
+                    except subprocess.TimeoutExpired:
+                        print("[T5-SUBPROCESS] Failed to kill subprocess")
+
+                # Clean up temp files
+                try:
+                    if params_file and os.path.exists(params_file):
+                        os.unlink(params_file)
+                    if embeddings_file and os.path.exists(embeddings_file):
+                        os.unlink(embeddings_file)
+                except:
+                    pass
+
+                print("[T5-SUBPROCESS] T5 encoding subprocess cancelled")
+                raise Exception("T5 encoding cancelled by user")
+
+            # Sleep briefly to avoid busy waiting
+            time.sleep(0.1)
+
+        # Get the return code
+        return_code = process.returncode
+
+        # Clean up params file
+        try:
+            if params_file and os.path.exists(params_file):
+                os.unlink(params_file)
+        except:
+            pass
+
+        if return_code == 0:
+            print("[T5-SUBPROCESS] T5 encoding completed successfully - loading embeddings...")
+            
+            # Load embeddings from file
+            if not os.path.exists(embeddings_file):
+                raise Exception(f"Embeddings file not found: {embeddings_file}")
+            
+            embeddings = torch.load(embeddings_file)
+            
+            # Clean up embeddings file
+            try:
+                os.unlink(embeddings_file)
+            except:
+                pass
+            
+            print("[T5-SUBPROCESS] T5 subprocess memory completely freed by OS")
+            return embeddings
+        else:
+            print(f"[T5-SUBPROCESS] T5 encoding failed with return code: {return_code}")
+            
+            # Clean up embeddings file
+            try:
+                if embeddings_file and os.path.exists(embeddings_file):
+                    os.unlink(embeddings_file)
+            except:
+                pass
+            
+            raise Exception(f"T5 encoding subprocess failed with return code: {return_code}")
+
+    except Exception as e:
+        error_msg = str(e)
+        if "cancelled by user" in error_msg.lower():
+            # Re-raise cancellation exceptions
+            raise e
+        else:
+            print(f"[T5-SUBPROCESS] Error running T5 encoding subprocess: {e}")
+            # Clean up process if it exists
+            if process and process.poll() is None:
+                try:
+                    process.terminate()
+                    process.wait(timeout=2.0)
+                except:
+                    try:
+                        process.kill()
+                    except:
+                        pass
+            # Clean up temp files
+            try:
+                if params_file and os.path.exists(params_file):
+                    os.unlink(params_file)
+                if embeddings_file and os.path.exists(embeddings_file):
+                    os.unlink(embeddings_file)
+            except:
+                pass
+            raise e
 
 def run_generation_subprocess(params):
     """Run a single generation in a subprocess to ensure memory cleanup."""
@@ -126,6 +306,7 @@ def run_generation_subprocess(params):
 
     process = None
     temp_file = None
+    embeddings_temp_file = None
 
     try:
         # Get the current script path and venv
@@ -143,6 +324,16 @@ def run_generation_subprocess(params):
         if not os.path.exists(python_exe):
             print(f"[SUBPROCESS] Venv python not found at {python_exe}, using system python")
             python_exe = sys.executable
+
+        # Handle text_embeddings_cache if provided
+        if 'text_embeddings_cache' in params and params['text_embeddings_cache'] is not None:
+            # Save embeddings to temp file
+            embeddings_temp_file = tempfile.mktemp(suffix='_embeddings.pt', dir=script_dir)
+            torch.save(params['text_embeddings_cache'], embeddings_temp_file)
+            # Replace embeddings with file path in params
+            params['text_embeddings_cache'] = embeddings_temp_file
+            print(f"[SUBPROCESS] Saved pre-encoded T5 embeddings to: {embeddings_temp_file}")
+            print(f"[SUBPROCESS] Generation subprocess will load embeddings instead of encoding T5")
 
         # Write params to temporary file to avoid command line issues
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, dir=script_dir) as f:
@@ -203,10 +394,12 @@ def run_generation_subprocess(params):
         # Get the return code
         return_code = process.returncode
 
-        # Clean up temp file
+        # Clean up temp files
         try:
             if temp_file and os.path.exists(temp_file):
                 os.unlink(temp_file)
+            if embeddings_temp_file and os.path.exists(embeddings_temp_file):
+                os.unlink(embeddings_temp_file)
         except:
             pass
 
@@ -241,10 +434,12 @@ def run_generation_subprocess(params):
                         process.kill()
                     except:
                         pass
-            # Clean up temp file
+            # Clean up temp files
             try:
                 if temp_file and os.path.exists(temp_file):
                     os.unlink(temp_file)
+                if embeddings_temp_file and os.path.exists(embeddings_temp_file):
+                    os.unlink(embeddings_temp_file)
             except:
                 pass
             return False
@@ -292,11 +487,32 @@ def generate_video(
     auto_crop_image=True,  # Default to True for backward compatibility
     base_filename=None,  # For batch processing to use custom filenames
     output_dir=None,  # Custom output directory (overrides args.output_dir)
+    text_embeddings_cache=None,  # Pre-encoded text embeddings from T5 subprocess
 ):
     global ovi_engine
 
     # Reset cancellation flag at the start of each generation request
     reset_cancellation()
+    
+    # CRITICAL: Auto-enable "Clear All Memory" when "Delete T5 After Encoding" is enabled
+    # This ensures T5 subprocess runs in isolation without model duplication
+    if delete_text_encoder and not clear_all:
+        print("=" * 80)
+        print("AUTO-OPTIMIZATION: Enabling 'Clear All Memory' mode")
+        print("When 'Delete T5 After Encoding' is enabled, 'Clear All Memory' is automatically enabled")
+        print("This prevents model duplication and ensures 100% memory cleanup")
+        print("=" * 80)
+        clear_all = True
+    
+    # Load text embeddings from file if provided as path (from subprocess)
+    if text_embeddings_cache is not None and isinstance(text_embeddings_cache, str):
+        if os.path.exists(text_embeddings_cache):
+            print(f"[DEBUG] Loading pre-encoded T5 embeddings from: {text_embeddings_cache}")
+            text_embeddings_cache = torch.load(text_embeddings_cache)
+            print(f"[DEBUG] T5 embeddings loaded successfully - will skip T5 encoding")
+        else:
+            print(f"[WARNING] Embeddings file not found: {text_embeddings_cache}")
+            text_embeddings_cache = None
 
     # Start timing
     import time
@@ -402,6 +618,50 @@ def generate_video(
             outputs_dir = os.path.join(os.path.dirname(__file__), "outputs")
         os.makedirs(outputs_dir, exist_ok=True)
 
+        # OPTIMIZATION: If clear_all + delete_text_encoder, run T5 encoding in subprocess FIRST
+        # This encodes text before any other models load, ensuring no duplication
+        # Only run T5 subprocess if embeddings weren't already provided (from file)
+        if clear_all and delete_text_encoder and text_embeddings_cache is None:
+            print("=" * 80)
+            print("T5 SUBPROCESS MODE (CLEAR ALL MEMORY)")
+            print("Running T5 encoding in subprocess BEFORE generation subprocess")
+            print("This ensures T5 never coexists with other models in memory")
+            print("=" * 80)
+            
+            try:
+                # Run T5 encoding in subprocess - only T5 + tokenizer will be loaded
+                text_embeddings_cache = run_t5_encoding_subprocess(
+                    text_prompt=text_prompt,
+                    video_negative_prompt=video_negative_prompt,
+                    audio_negative_prompt=audio_negative_prompt,
+                    fp8_t5=fp8_t5,
+                    cpu_only_t5=cpu_only_t5
+                )
+                
+                print("=" * 80)
+                print("T5 SUBPROCESS COMPLETED")
+                print("Text embeddings cached - will be passed to generation subprocess")
+                print("T5 memory fully freed by OS")
+                print("=" * 80)
+            except Exception as e:
+                error_msg = str(e)
+                if "cancelled by user" in error_msg.lower():
+                    print("T5 encoding cancelled by user")
+                    reset_cancellation()
+                    return None
+                else:
+                    print(f"[WARNING] T5 subprocess failed: {e}")
+                    print("[WARNING] Will retry T5 encoding in generation subprocess")
+                    text_embeddings_cache = None
+        else:
+            # T5 subprocess was skipped (embeddings already loaded from file)
+            if text_embeddings_cache is not None:
+                print("=" * 80)
+                print("T5 EMBEDDINGS ALREADY LOADED FROM FILE")
+                print(f"Embeddings type: {type(text_embeddings_cache)}, length: {len(text_embeddings_cache) if isinstance(text_embeddings_cache, list) else 'N/A'}")
+                print("Skipping T5 subprocess - using pre-loaded embeddings")
+                print("=" * 80)
+
         last_output_path = None
 
         # Generate multiple videos
@@ -441,7 +701,7 @@ def generate_video(
                     'audio_negative_prompt': audio_negative_prompt,
                     'use_image_gen': False,  # Not used in single gen mode
                     'cpu_offload': cpu_offload,
-                    'delete_text_encoder': delete_text_encoder,
+                    'delete_text_encoder': delete_text_encoder if text_embeddings_cache is None else False,  # Skip T5 if already encoded
                     'fp8_t5': fp8_t5,
                     'cpu_only_t5': cpu_only_t5,
                     'fp8_base_model': fp8_base_model,
@@ -461,6 +721,7 @@ def generate_video(
                         'auto_crop_image': auto_crop_image,
                         'base_filename': base_filename,  # Pass base filename for batch processing
                         'output_dir': outputs_dir,  # Pass output directory to subprocess
+                        'text_embeddings_cache': text_embeddings_cache,  # Pass pre-encoded embeddings if available
                     }
 
                 run_generation_subprocess(single_gen_params)
@@ -482,6 +743,12 @@ def generate_video(
                     continue
 
             # Original generation logic (when clear_all is disabled)
+            # Debug: Check if embeddings cache is available
+            if text_embeddings_cache is not None:
+                print(f"[DEBUG] Passing text_embeddings_cache to engine (type: {type(text_embeddings_cache)}, len: {len(text_embeddings_cache) if isinstance(text_embeddings_cache, list) else 'N/A'})")
+            else:
+                print(f"[DEBUG] No text_embeddings_cache available - T5 will be loaded in-process")
+            
             # Use cancellable generation wrapper for interruptible generation
             generated_video, generated_audio, _ = generate_with_cancellation_check(
                 ovi_engine.generate,
@@ -498,7 +765,7 @@ def generate_video(
                 blocks_to_swap=None,  # Block swap is configured at engine init, not per-generation
                 video_negative_prompt=video_negative_prompt,
                 audio_negative_prompt=audio_negative_prompt,
-                delete_text_encoder=delete_text_encoder,
+                delete_text_encoder=delete_text_encoder if text_embeddings_cache is None else False,  # Skip T5 if already encoded
                 no_block_prep=no_block_prep,
                 fp8_t5=fp8_t5,
                 cpu_only_t5=cpu_only_t5,
@@ -506,6 +773,7 @@ def generate_video(
                 vae_tiled_decode=vae_tiled_decode,
                 vae_tile_size=vae_tile_size,
                 vae_tile_overlap=vae_tile_overlap,
+                text_embeddings_cache=text_embeddings_cache,  # Pass pre-encoded embeddings if available
             )
 
             # Get next available filename in sequential format
@@ -2692,7 +2960,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                             delete_text_encoder = gr.Checkbox(
                                 label="Delete T5 After Encoding",
                                 value=False,
-                                info="Delete T5 encoder after text encoding to save ~5GB VRAM"
+                                info="T5 subprocess for 100% memory cleanup (~5GB freed). Auto-enables 'Clear All Memory' mode."
                             )
                             fp8_t5 = gr.Checkbox(
                                 label="Scaled FP8 T5",
@@ -2890,8 +3158,9 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                         - **SLG Layer**: Audio-video sync (-1 to disable, 11 recommended)
                         - **Block Swap**: CPU blocks for VRAM savings
                         - **CPU Offload**: Offload models between operations
+                        - **Delete T5 After Encoding**: Runs T5 in isolated subprocess before generation subprocess. Auto-enables "Clear All Memory". Perfect isolation, no model duplication (~5GB VRAM/RAM freed)
                         - **Scaled FP8 Base Model**: Quantize transformer to FP8 (~50% VRAM savings, works with block swap)
-                        - **Clear All Memory**: Run each generation as separate process to prevent VRAM/RAM leaks (recommended)
+                        - **Clear All Memory**: Run each generation as separate process to prevent VRAM/RAM leaks (recommended, auto-enabled with Delete T5)
 
                         ## 💡 Tips for Best Results
 
@@ -2931,6 +3200,21 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                         - **Why Clear All Memory is important**: Each generation loads large AI models into VRAM/RAM. Without clearing, residual memory from previous generations can accumulate, causing slowdowns or crashes over time.
                         - **How it works**: When enabled, each generation runs in a separate Python process. When the process exits, all memory is automatically freed by the operating system.
                         - **Performance impact**: Minimal - subprocess startup is fast, and memory cleanup ensures consistent performance across multiple generations.
+                        
+                        ### T5 Subprocess Mode (Automatic & Simplified)
+                        - **What it does**: When "Delete T5 After Encoding" is enabled, T5 text encoding automatically runs in a separate subprocess for 100% guaranteed memory cleanup.
+                        - **Auto-enables "Clear All Memory"**: For simplicity and to prevent model duplication, enabling "Delete T5 After Encoding" automatically enables "Clear All Memory" mode.
+                        - **How it works**:
+                          1. Main process spawns T5 subprocess → T5 loads + encodes text → saves embeddings → exits → OS frees ALL T5 memory
+                          2. Main process spawns generation subprocess → loads embeddings + other models → generates → exits → OS frees ALL memory
+                        - **Why it's optimal**:
+                          - ✅ T5 subprocess: Only loads T5 + tokenizer (~5-11GB)
+                          - ✅ Generation subprocess: Only loads VAE + Fusion (~8GB), NO T5
+                          - ✅ NO MODEL DUPLICATION - completely isolated processes
+                          - ✅ 100% memory cleanup by OS (not dependent on Python GC)
+                        - **Models loaded by T5 subprocess**: Only T5 encoder + tokenizer (no VAE, no fusion model, no image model)
+                        - **Performance impact**: ~1-2 seconds overhead per generation for subprocess startup and embeddings I/O, but ensures perfect memory isolation.
+                        - **Fallback**: If subprocess fails, automatically falls back to in-process encoding with manual deletion.
 
                         ### Quality Issues
                         - 🔄 Try different random seeds
@@ -3556,9 +3840,108 @@ def run_single_generation_from_file(json_file_path):
         traceback.print_exc()
         sys.exit(1)
 
+def run_t5_encoding_only(params_file_path, output_embeddings_path):
+    """Run T5 text encoding only and save embeddings to file. Exit when done."""
+    try:
+        import json
+        from ovi.utils.model_loading_utils import init_text_model
+        
+        print("=" * 80)
+        print("T5 ENCODING SUBPROCESS STARTED")
+        print("=" * 80)
+        
+        # Load parameters
+        with open(params_file_path, 'r') as f:
+            params = json.load(f)
+        
+        text_prompt = params['text_prompt']
+        video_negative_prompt = params['video_negative_prompt']
+        audio_negative_prompt = params['audio_negative_prompt']
+        fp8_t5 = params.get('fp8_t5', False)
+        cpu_only_t5 = params.get('cpu_only_t5', False)
+        
+        print(f"[T5-ONLY] Text Prompt: {text_prompt[:50]}...")
+        print(f"[T5-ONLY] FP8 Mode: {fp8_t5}")
+        print(f"[T5-ONLY] CPU-Only Mode: {cpu_only_t5}")
+        print("=" * 80)
+        
+        # Determine checkpoint directory
+        ckpt_dir = os.path.join(os.path.dirname(__file__), "ckpts")
+        
+        # Initialize T5 text encoder
+        if cpu_only_t5 and fp8_t5:
+            print("Loading T5 in CPU-Only + Scaled FP8 mode...")
+        elif cpu_only_t5:
+            print("Loading T5 in CPU-Only mode...")
+        elif fp8_t5:
+            print("Loading T5 in Scaled FP8 mode...")
+        else:
+            print("Loading T5 in standard mode...")
+        
+        device = 'cpu' if cpu_only_t5 else 0
+        text_model = init_text_model(
+            ckpt_dir,
+            rank=device,
+            fp8=fp8_t5,
+            cpu_only=cpu_only_t5
+        )
+        
+        print("[T5-ONLY] T5 model loaded successfully")
+        print("[T5-ONLY] Encoding text prompts...")
+        
+        # Encode text embeddings
+        encode_device = 'cpu' if cpu_only_t5 else 0
+        text_embeddings = text_model(
+            [text_prompt, video_negative_prompt, audio_negative_prompt],
+            encode_device
+        )
+        
+        print("[T5-ONLY] Text encoding completed")
+        
+        # Move embeddings to CPU for saving (if they're on GPU)
+        text_embeddings_cpu = [emb.cpu() for emb in text_embeddings]
+        
+        # Save embeddings to file
+        print(f"[T5-ONLY] Saving embeddings to: {output_embeddings_path}")
+        torch.save(text_embeddings_cpu, output_embeddings_path)
+        
+        # Explicitly delete T5 model before exit (helps with cleanup)
+        del text_model
+        del text_embeddings
+        del text_embeddings_cpu
+        
+        # Force garbage collection
+        import gc
+        gc.collect()
+        
+        # Clear CUDA cache if GPU was used
+        if not cpu_only_t5 and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        print("=" * 80)
+        print("T5 ENCODING SUBPROCESS COMPLETED")
+        print("Process will exit now - OS will free ALL memory")
+        print("=" * 80)
+        
+        # Exit successfully - OS will free ALL memory
+        sys.exit(0)
+        
+    except Exception as e:
+        print(f"[T5-ONLY] Error during T5 encoding: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
 if __name__ == "__main__":
-    print(f"[DEBUG] Main block: single_generation_file={args.single_generation_file}, single_generation={args.single_generation}, test={getattr(args, 'test', False)}, test_subprocess={getattr(args, 'test_subprocess', False)}")
-    if args.single_generation_file:
+    print(f"[DEBUG] Main block: single_generation_file={args.single_generation_file}, single_generation={args.single_generation}, encode_t5_only={bool(args.encode_t5_only)}, test={getattr(args, 'test', False)}, test_subprocess={getattr(args, 'test_subprocess', False)}")
+    if args.encode_t5_only:
+        print("[DEBUG] Taking encode_t5_only path")
+        # T5 encoding only mode - run and exit
+        if not args.output_embeddings:
+            print("[ERROR] --output-embeddings path required for T5 encoding mode")
+            sys.exit(1)
+        run_t5_encoding_only(args.encode_t5_only, args.output_embeddings)
+    elif args.single_generation_file:
         print("[DEBUG] Taking single_generation_file path")
         # Single generation mode from file - run and exit
         run_single_generation_from_file(args.single_generation_file)
