@@ -531,48 +531,57 @@ def extract_last_frame(video_path):
         return None
 
 def combine_videos(video_paths, output_path):
-    """Combine multiple videos into one by concatenating them."""
+    """Combine multiple videos into one by concatenating them with FFmpeg."""
     try:
-        import cv2
+        import subprocess
+        import tempfile
+        import os
 
         if len(video_paths) < 2:
             print("[VIDEO EXTENSION] Only one video, no combination needed")
             return False
 
-        # Get video properties from first video
-        cap = cv2.VideoCapture(video_paths[0])
-        if not cap.isOpened():
-            raise Exception("Could not open first video")
+        # Create a temporary file list for FFmpeg concat
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+            for video_path in video_paths:
+                # Escape single quotes in path for FFmpeg
+                escaped_path = video_path.replace("'", r"'\''")
+                f.write(f"file '{escaped_path}'\n")
+            concat_file = f.name
 
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        cap.release()
+        try:
+            # Use FFmpeg to concatenate videos with audio
+            cmd = [
+                'ffmpeg', '-y', '-f', 'concat', '-safe', '0',
+                '-i', concat_file,
+                '-c', 'copy',  # Copy streams to preserve audio/video codecs
+                '-avoid_negative_ts', 'make_zero',  # Handle timestamp issues
+                output_path
+            ]
 
-        # Create video writer
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+            print(f"[VIDEO EXTENSION] Running FFmpeg concat command: {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=os.getcwd())
 
-        # Process each video
-        for video_path in video_paths:
-            cap = cv2.VideoCapture(video_path)
-            if not cap.isOpened():
-                print(f"[VIDEO EXTENSION] Warning: Could not open {video_path}, skipping")
-                continue
+            if result.returncode == 0:
+                print(f"[VIDEO EXTENSION] Combined {len(video_paths)} videos into: {output_path}")
+                return True
+            else:
+                print(f"[VIDEO EXTENSION] FFmpeg failed with return code {result.returncode}")
+                print(f"[VIDEO EXTENSION] FFmpeg stdout: {result.stdout}")
+                print(f"[VIDEO EXTENSION] FFmpeg stderr: {result.stderr}")
+                return False
 
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                out.write(frame)
-            cap.release()
-
-        out.release()
-        print(f"[VIDEO EXTENSION] Combined {len(video_paths)} videos into: {output_path}")
-        return True
+        finally:
+            # Clean up temporary file
+            try:
+                os.unlink(concat_file)
+            except:
+                pass
 
     except Exception as e:
         print(f"[VIDEO EXTENSION] Error combining videos: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 def save_used_source_image(image_path, output_dir, video_filename):
@@ -710,10 +719,7 @@ def generate_video(
     # For video extension validation, always parse lines to count them
     validation_prompts = parse_multiline_prompts(text_prompt, True)  # Always parse for validation
 
-    # Auto-enable video extensions if multi-line prompts detected and count is 0
-    if video_extension_count == 0 and len(validation_prompts) > 1:
-        video_extension_count = len(validation_prompts) - 1
-        print(f"[AUTO-EXTENSION] Detected {len(validation_prompts)} prompt lines, auto-enabling video extensions with count {video_extension_count}")
+    # Auto-extension logic removed - users now have explicit manual control with Video Extension Count
 
     # Validate video extension requirements
     if video_extension_count > 0:
@@ -938,240 +944,156 @@ def generate_video(
                     existing_files = glob.glob(pattern)
                     if existing_files:
                         output_path = max(existing_files, key=os.path.getctime)
+                        last_output_path = output_path
                         print(f"[GENERATION {gen_idx + 1}/{int(num_generations)}] Completed: {os.path.basename(output_path)}")
                     else:
                         print(f"[GENERATION {gen_idx + 1}/{int(num_generations)}] No output file found in {outputs_dir}")
                         continue
 
                 # Original generation logic (when clear_all is disabled)
-                # Debug: Check if embeddings cache is available
-                if text_embeddings_cache is not None:
-                    print(f"[DEBUG] Passing text_embeddings_cache to engine (type: {type(text_embeddings_cache)}, len: {len(text_embeddings_cache) if isinstance(text_embeddings_cache, list) else 'N/A'})")
-                else:
-                    print(f"[DEBUG] No text_embeddings_cache available - T5 will be loaded in-process")
+                if not clear_all:
+                    # Debug: Check if embeddings cache is available
+                    if text_embeddings_cache is not None:
+                        print(f"[DEBUG] Passing text_embeddings_cache to engine (type: {type(text_embeddings_cache)}, len: {len(text_embeddings_cache) if isinstance(text_embeddings_cache, list) else 'N/A'})")
+                    else:
+                        print(f"[DEBUG] No text_embeddings_cache available - T5 will be loaded in-process")
 
-                # Safety check: ensure ovi_engine is initialized
-                if ovi_engine is None:
-                    print("[WARNING] ovi_engine is None, skipping in-process generation")
-                    return None
+                    # Safety check: ensure ovi_engine is initialized
+                    if ovi_engine is None:
+                        print("[WARNING] ovi_engine is None, skipping in-process generation")
+                        return None
 
-                # Ensure image_path is valid before passing to engine
-                if not isinstance(image_path, (str, type(None))):
-                    print(f"[GENERATE] Warning: image_path is invalid type {type(image_path)}, setting to None")
-                    image_path = None
+                    # Ensure image_path is valid before passing to engine
+                    if not isinstance(image_path, (str, type(None))):
+                        print(f"[GENERATE] Warning: image_path is invalid type {type(image_path)}, setting to None")
+                        image_path = None
 
-                # Use cancellable generation wrapper for interruptible generation
-                generated_video, generated_audio, _ = generate_with_cancellation_check(
-                    ovi_engine.generate,
-                    text_prompt=current_prompt,  # Use current prompt from multi-line parsing
-                    image_path=image_path,
-                    video_frame_height_width=[video_frame_height, video_frame_width],
-                    seed=current_seed,
-                    solver_name=solver_name,
-                    sample_steps=sample_steps,
-                    shift=shift,
-                    video_guidance_scale=video_guidance_scale,
-                    audio_guidance_scale=audio_guidance_scale,
-                    slg_layer=slg_layer,
-                    blocks_to_swap=None,  # Block swap is configured at engine init, not per-generation
-                    video_negative_prompt=video_negative_prompt,
-                    audio_negative_prompt=audio_negative_prompt,
-                    delete_text_encoder=delete_text_encoder if text_embeddings_cache is None else False,  # Skip T5 if already encoded
-                    no_block_prep=no_block_prep,
-                    fp8_t5=fp8_t5,
-                    cpu_only_t5=cpu_only_t5,
-                    fp8_base_model=fp8_base_model,
-                    vae_tiled_decode=vae_tiled_decode,
-                    vae_tile_size=vae_tile_size,
-                    vae_tile_overlap=vae_tile_overlap,
-                    text_embeddings_cache=text_embeddings_cache,  # Pass pre-encoded embeddings if available
-                )
+                    # Use cancellable generation wrapper for interruptible generation
+                    generated_video, generated_audio, _ = generate_with_cancellation_check(
+                        ovi_engine.generate,
+                        text_prompt=current_prompt,  # Use current prompt from multi-line parsing
+                        image_path=image_path,
+                        video_frame_height_width=[video_frame_height, video_frame_width],
+                        seed=current_seed,
+                        solver_name=solver_name,
+                        sample_steps=sample_steps,
+                        shift=shift,
+                        video_guidance_scale=video_guidance_scale,
+                        audio_guidance_scale=audio_guidance_scale,
+                        slg_layer=slg_layer,
+                        blocks_to_swap=None,  # Block swap is configured at engine init, not per-generation
+                        video_negative_prompt=video_negative_prompt,
+                        audio_negative_prompt=audio_negative_prompt,
+                        delete_text_encoder=delete_text_encoder if text_embeddings_cache is None else False,  # Skip T5 if already encoded
+                        no_block_prep=no_block_prep,
+                        fp8_t5=fp8_t5,
+                        cpu_only_t5=cpu_only_t5,
+                        fp8_base_model=fp8_base_model,
+                        vae_tiled_decode=vae_tiled_decode,
+                        vae_tile_size=vae_tile_size,
+                        vae_tile_overlap=vae_tile_overlap,
+                        text_embeddings_cache=text_embeddings_cache,  # Pass pre-encoded embeddings if available
+                    )
 
-                # Get next available filename in sequential format
-                output_filename = get_next_filename(outputs_dir, base_filename=base_filename)
-                output_path = os.path.join(outputs_dir, output_filename)
+                    # Get filename for this generation
+                    if gen_idx == 0:
+                        # First generation: use base filename or get next sequential
+                        output_filename = get_next_filename(outputs_dir, base_filename=base_filename)
+                        # For batch processing, remove the _0001 suffix if it's the first generation
+                        if base_filename and output_filename.endswith("_0001.mp4"):
+                            output_filename = f"{base_filename}.mp4"
+                    else:
+                        # Subsequent generations: append _2, _3, etc. to the base filename
+                        if base_filename:
+                            # For batch processing, ensure no conflicts
+                            gen_suffix = f"_{gen_idx + 1}"
+                            candidate_filename = f"{base_filename}{gen_suffix}.mp4"
+                            counter = 1
+                            while os.path.exists(os.path.join(outputs_dir, candidate_filename)):
+                                candidate_filename = f"{base_filename}{gen_suffix}_{counter}.mp4"
+                                counter += 1
+                            output_filename = candidate_filename
+                        else:
+                            # For regular generation, just get next sequential
+                            output_filename = get_next_filename(outputs_dir, base_filename=None)
+                    output_path = os.path.join(outputs_dir, output_filename)
 
-                # Handle no_audio option
-                if no_audio:
-                    generated_audio = None
+                    # Handle no_audio option
+                    if no_audio:
+                        generated_audio = None
 
-                save_video(output_path, generated_video, generated_audio, fps=24, sample_rate=16000)
-                last_output_path = output_path
+                    save_video(output_path, generated_video, generated_audio, fps=24, sample_rate=16000)
+                    last_output_path = output_path
 
-                # Save used source image
-                save_used_source_image(image_path, outputs_dir, output_filename)
+                    # Save used source image
+                    save_used_source_image(image_path, outputs_dir, output_filename)
 
-                # Save metadata if enabled
-                if save_metadata:
-                    generation_params = {
-                        'text_prompt': current_prompt,  # Use current prompt for metadata
-                        'image_path': image_path,
-                        'video_frame_height': video_frame_height,
-                        'video_frame_width': video_frame_width,
-                        'aspect_ratio': aspect_ratio,
-                        'randomize_seed': randomize_seed,
-                        'num_generations': num_generations,
-                        'solver_name': solver_name,
-                        'sample_steps': sample_steps,
-                        'shift': shift,
-                        'video_guidance_scale': video_guidance_scale,
-                        'audio_guidance_scale': audio_guidance_scale,
-                        'slg_layer': slg_layer,
-                        'blocks_to_swap': blocks_to_swap,
-                        'cpu_offload': cpu_offload,
-                        'delete_text_encoder': delete_text_encoder,
-                        'fp8_t5': fp8_t5,
-                        'cpu_only_t5': cpu_only_t5,
-                        'fp8_base_model': fp8_base_model,
-                        'no_audio': no_audio,
-                        'no_block_prep': no_block_prep,
-                        'clear_all': clear_all,
-                        'vae_tiled_decode': vae_tiled_decode,
-                        'vae_tile_size': vae_tile_size,
-                        'vae_tile_overlap': vae_tile_overlap,
-                        'base_resolution_width': base_resolution_width,
-                        'base_resolution_height': base_resolution_height,
-                        'duration_seconds': duration_seconds,
-                        'video_negative_prompt': video_negative_prompt,
-                        'audio_negative_prompt': audio_negative_prompt,
-                        'is_batch': False
-                    }
-                    save_generation_metadata(output_path, generation_params, current_seed)
+                    # Save metadata if enabled
+                    if save_metadata:
+                        generation_params = {
+                            'text_prompt': current_prompt,  # Use current prompt for metadata
+                            'image_path': image_path,
+                            'video_frame_height': video_frame_height,
+                            'video_frame_width': video_frame_width,
+                            'aspect_ratio': aspect_ratio,
+                            'randomize_seed': randomize_seed,
+                            'num_generations': num_generations,
+                            'solver_name': solver_name,
+                            'sample_steps': sample_steps,
+                            'shift': shift,
+                            'video_guidance_scale': video_guidance_scale,
+                            'audio_guidance_scale': audio_guidance_scale,
+                            'slg_layer': slg_layer,
+                            'blocks_to_swap': blocks_to_swap,
+                            'cpu_offload': cpu_offload,
+                            'delete_text_encoder': delete_text_encoder,
+                            'fp8_t5': fp8_t5,
+                            'cpu_only_t5': cpu_only_t5,
+                            'fp8_base_model': fp8_base_model,
+                            'no_audio': no_audio,
+                            'no_block_prep': no_block_prep,
+                            'clear_all': clear_all,
+                            'vae_tiled_decode': vae_tiled_decode,
+                            'vae_tile_size': vae_tile_size,
+                            'vae_tile_overlap': vae_tile_overlap,
+                            'base_resolution_width': base_resolution_width,
+                            'base_resolution_height': base_resolution_height,
+                            'duration_seconds': duration_seconds,
+                            'video_negative_prompt': video_negative_prompt,
+                            'audio_negative_prompt': audio_negative_prompt,
+                            'is_batch': False
+                        }
+                        save_generation_metadata(output_path, generation_params, current_seed)
 
-                print(f"[GENERATION {gen_idx + 1}/{int(num_generations)}] Saved to: {output_path}")
+                    print(f"[GENERATION {gen_idx + 1}/{int(num_generations)}] Saved to: {output_path}")
 
-                # Handle video extensions if enabled
-                if video_extension_count > 0:
-                    print(f"[VIDEO EXTENSION] Starting {video_extension_count} extensions for prompt {prompt_idx + 1}")
+                    # Handle video extensions if enabled (skip when clear_all=True since subprocess handles it)
+                    if video_extension_count > 0:
+                        print(f"[VIDEO EXTENSION] Starting {video_extension_count} extensions for prompt {prompt_idx + 1}")
 
-                    extension_videos = [output_path]  # Start with the main video
-                    current_image_path = extract_last_frame(output_path)  # Extract last frame
+                        extension_videos = [output_path]  # Start with the main video
+                        current_image_path = extract_last_frame(output_path)  # Extract last frame
 
-                    if current_image_path:
-                        # Get base name from main video for consistent naming
-                        main_base = os.path.splitext(os.path.basename(output_path))[0]
+                        if current_image_path:
+                            # Get base name from main video for consistent naming
+                            main_base = os.path.splitext(os.path.basename(output_path))[0]
 
-                        # Generate extension videos
-                        for ext_idx in range(video_extension_count):
-                            # Use next prompt if available, otherwise use current prompt
-                            next_prompt_idx = prompt_idx + ext_idx + 1
-                            if next_prompt_idx < len(validation_prompts):
-                                extension_prompt = validation_prompts[next_prompt_idx]
-                                print(f"[VIDEO EXTENSION] Extension {ext_idx + 1}: Using next prompt from parsed lines")
-                            else:
-                                extension_prompt = current_prompt  # Repeat current prompt
-                                print(f"[VIDEO EXTENSION] Extension {ext_idx + 1}: Repeating current prompt (no more prompts available)")
-                            print(f"[VIDEO EXTENSION] Extension {ext_idx + 1}: Using last frame + prompt: {extension_prompt[:50]}{'...' if len(extension_prompt) > 50 else ''}")
-
-                            # Generate extension video
-                            check_cancellation()
-
-                            # Construct desired extension filename
-                            ext_filename = f"{main_base}_ext{ext_idx + 1}.mp4"
-                            ext_output_path = os.path.join(outputs_dir, ext_filename)
-
-                            # Check for conflicts and increment if needed
-                            if os.path.exists(ext_output_path):
-                                counter = 1
-                                while os.path.exists(os.path.join(outputs_dir, f"{main_base}_ext{ext_idx + 1}_{counter}.mp4")):
-                                    counter += 1
-                                ext_filename = f"{main_base}_ext{ext_idx + 1}_{counter}.mp4"
-                                ext_output_path = os.path.join(outputs_dir, ext_filename)
-
-                            if clear_all:
-                                # Run extension in subprocess
-                                ext_params = {
-                                    'text_prompt': extension_prompt,
-                                    'image': current_image_path,
-                                    'video_frame_height': video_frame_height,
-                                    'video_frame_width': video_frame_width,
-                                    'video_seed': current_seed,  # Use same seed
-                                    'solver_name': solver_name,
-                                    'sample_steps': sample_steps,
-                                    'shift': shift,
-                                    'video_guidance_scale': video_guidance_scale,
-                                    'audio_guidance_scale': audio_guidance_scale,
-                                    'slg_layer': slg_layer,
-                                    'blocks_to_swap': blocks_to_swap,
-                                    'video_negative_prompt': video_negative_prompt,
-                                    'audio_negative_prompt': audio_negative_prompt,
-                                    'use_image_gen': False,
-                                    'cpu_offload': cpu_offload,
-                                    'delete_text_encoder': delete_text_encoder if text_embeddings_cache is None else False,
-                                    'fp8_t5': fp8_t5,
-                                    'cpu_only_t5': cpu_only_t5,
-                                    'fp8_base_model': fp8_base_model,
-                                    'no_audio': no_audio,
-                                    'no_block_prep': no_block_prep,
-                                    'num_generations': 1,
-                                    'randomize_seed': False,
-                                    'save_metadata': save_metadata,
-                                    'aspect_ratio': aspect_ratio,
-                                    'clear_all': False,
-                                    'vae_tiled_decode': vae_tiled_decode,
-                                    'vae_tile_size': vae_tile_size,
-                                    'vae_tile_overlap': vae_tile_overlap,
-                                    'base_resolution_width': base_resolution_width,
-                                    'base_resolution_height': base_resolution_height,
-                                    'duration_seconds': duration_seconds,
-                                    'auto_crop_image': False,  # Image already processed
-                                    'base_filename': base_filename,
-                                    'output_dir': outputs_dir,
-                                    'text_embeddings_cache': text_embeddings_cache,
-                                    'enable_multiline_prompts': False,
-                                    'video_extension_count': 0,
-                                }
-
-                                run_generation_subprocess(ext_params)
-
-                                # Find the generated extension file and rename it
-                                import glob
-                                pattern = os.path.join(outputs_dir, "ovi_generation_*.mp4")
-                                existing_files = glob.glob(pattern)
-                                if existing_files:
-                                    generated_file = max(existing_files, key=os.path.getctime)
-                                    # Rename to desired extension filename
-                                    os.rename(generated_file, ext_output_path)
-                                    extension_videos.append(ext_output_path)
-                                    current_image_path = extract_last_frame(ext_output_path)  # Extract for next extension
-                                    print(f"[VIDEO EXTENSION] Extension {ext_idx + 1} saved: {ext_filename}")
+                            # Generate extension videos
+                            for ext_idx in range(video_extension_count):
+                                # Use next prompt if available, otherwise use current prompt
+                                next_prompt_idx = prompt_idx + ext_idx + 1
+                                if next_prompt_idx < len(validation_prompts):
+                                    extension_prompt = validation_prompts[next_prompt_idx]
+                                    print(f"[VIDEO EXTENSION] Extension {ext_idx + 1}: Using next prompt from parsed lines")
                                 else:
-                                    print(f"[VIDEO EXTENSION] Warning: Extension {ext_idx + 1} file not found")
-                                    break
-                            else:
-                                # Safety check: ensure ovi_engine is initialized
-                                if ovi_engine is None:
-                                    print("[WARNING] ovi_engine is None, skipping extension in-process generation")
-                                    continue
+                                    extension_prompt = current_prompt  # Repeat current prompt
+                                    print(f"[VIDEO EXTENSION] Extension {ext_idx + 1}: Repeating current prompt (no more prompts available)")
+                                print(f"[VIDEO EXTENSION] Extension {ext_idx + 1}: Using last frame + prompt: {extension_prompt[:50]}{'...' if len(extension_prompt) > 50 else ''}")
 
-                                # Generate extension in-process
-                                ext_generated_video, ext_generated_audio, _ = generate_with_cancellation_check(
-                                    ovi_engine.generate,
-                                    text_prompt=extension_prompt,
-                                    image_path=current_image_path,
-                                    video_frame_height_width=[video_frame_height, video_frame_width],
-                                    seed=current_seed,
-                                    solver_name=solver_name,
-                                    sample_steps=sample_steps,
-                                    shift=shift,
-                                    video_guidance_scale=video_guidance_scale,
-                                    audio_guidance_scale=audio_guidance_scale,
-                                    slg_layer=slg_layer,
-                                    blocks_to_swap=None,
-                                    video_negative_prompt=video_negative_prompt,
-                                    audio_negative_prompt=audio_negative_prompt,
-                                    delete_text_encoder=delete_text_encoder if text_embeddings_cache is None else False,
-                                    no_block_prep=no_block_prep,
-                                    fp8_t5=fp8_t5,
-                                    cpu_only_t5=cpu_only_t5,
-                                    fp8_base_model=fp8_base_model,
-                                    vae_tiled_decode=vae_tiled_decode,
-                                    vae_tile_size=vae_tile_size,
-                                    vae_tile_overlap=vae_tile_overlap,
-                                    text_embeddings_cache=text_embeddings_cache,
-                                )
+                                # Generate extension video
+                                check_cancellation()
 
-                                # Save extension video with proper naming
+                                # Construct desired extension filename
                                 ext_filename = f"{main_base}_ext{ext_idx + 1}.mp4"
                                 ext_output_path = os.path.join(outputs_dir, ext_filename)
 
@@ -1183,27 +1105,14 @@ def generate_video(
                                     ext_filename = f"{main_base}_ext{ext_idx + 1}_{counter}.mp4"
                                     ext_output_path = os.path.join(outputs_dir, ext_filename)
 
-                                if no_audio:
-                                    ext_generated_audio = None
-
-                                save_video(ext_output_path, ext_generated_video, ext_generated_audio, fps=24, sample_rate=16000)
-                                extension_videos.append(ext_output_path)
-
-                                # Save used source image for extension
-                                save_used_source_image(current_image_path, outputs_dir, ext_filename)
-
-                                current_image_path = extract_last_frame(ext_output_path)  # Extract for next extension
-
-                                # Save metadata for extension
-                                if save_metadata:
-                                    ext_generation_params = {
+                                if clear_all:
+                                    # Run extension in subprocess
+                                    ext_params = {
                                         'text_prompt': extension_prompt,
-                                        'image_path': current_image_path,
+                                        'image': current_image_path,
                                         'video_frame_height': video_frame_height,
                                         'video_frame_width': video_frame_width,
-                                        'aspect_ratio': aspect_ratio,
-                                        'randomize_seed': False,
-                                        'num_generations': 1,
+                                        'video_seed': current_seed,  # Use same seed
                                         'solver_name': solver_name,
                                         'sample_steps': sample_steps,
                                         'shift': shift,
@@ -1211,51 +1120,169 @@ def generate_video(
                                         'audio_guidance_scale': audio_guidance_scale,
                                         'slg_layer': slg_layer,
                                         'blocks_to_swap': blocks_to_swap,
+                                        'video_negative_prompt': video_negative_prompt,
+                                        'audio_negative_prompt': audio_negative_prompt,
+                                        'use_image_gen': False,
                                         'cpu_offload': cpu_offload,
-                                        'delete_text_encoder': delete_text_encoder,
+                                        'delete_text_encoder': delete_text_encoder if text_embeddings_cache is None else False,
                                         'fp8_t5': fp8_t5,
                                         'cpu_only_t5': cpu_only_t5,
                                         'fp8_base_model': fp8_base_model,
                                         'no_audio': no_audio,
                                         'no_block_prep': no_block_prep,
-                                        'clear_all': clear_all,
+                                        'num_generations': 1,
+                                        'randomize_seed': False,
+                                        'save_metadata': save_metadata,
+                                        'aspect_ratio': aspect_ratio,
+                                        'clear_all': False,
                                         'vae_tiled_decode': vae_tiled_decode,
                                         'vae_tile_size': vae_tile_size,
                                         'vae_tile_overlap': vae_tile_overlap,
                                         'base_resolution_width': base_resolution_width,
                                         'base_resolution_height': base_resolution_height,
                                         'duration_seconds': duration_seconds,
-                                        'video_negative_prompt': video_negative_prompt,
-                                        'audio_negative_prompt': audio_negative_prompt,
-                                        'is_batch': False,
-                                        'is_extension': True,
-                                        'extension_index': ext_idx + 1,
+                                        'auto_crop_image': False,  # Image already processed
+                                        'base_filename': base_filename,
+                                        'output_dir': outputs_dir,
+                                        'text_embeddings_cache': text_embeddings_cache,
+                                        'enable_multiline_prompts': False,
+                                        'video_extension_count': 0,
                                     }
-                                    save_generation_metadata(ext_output_path, ext_generation_params, current_seed)
 
-                                print(f"[VIDEO EXTENSION] Extension {ext_idx + 1} saved: {ext_filename}")
+                                    run_generation_subprocess(ext_params)
 
-                        # Combine all videos (main + extensions) into final video
-                        if len(extension_videos) > 1:
-                            # Construct final filename
-                            final_filename = f"{main_base}_final.mp4"
-                            final_path = os.path.join(outputs_dir, final_filename)
+                                    # Find the generated extension file and rename it
+                                    import glob
+                                    pattern = os.path.join(outputs_dir, "ovi_generation_*.mp4")
+                                    existing_files = glob.glob(pattern)
+                                    if existing_files:
+                                        generated_file = max(existing_files, key=os.path.getctime)
+                                        # Rename to desired extension filename
+                                        os.rename(generated_file, ext_output_path)
+                                        extension_videos.append(ext_output_path)
+                                        current_image_path = extract_last_frame(ext_output_path)  # Extract for next extension
+                                        print(f"[VIDEO EXTENSION] Extension {ext_idx + 1} saved: {ext_filename}")
+                                    else:
+                                        print(f"[VIDEO EXTENSION] Warning: Extension {ext_idx + 1} file not found")
+                                        break
+                                else:
+                                    # Safety check: ensure ovi_engine is initialized
+                                    if ovi_engine is None:
+                                        print("[WARNING] ovi_engine is None, skipping extension in-process generation")
+                                        continue
 
-                            # Check for conflicts and increment if needed
-                            if os.path.exists(final_path):
-                                counter = 1
-                                while os.path.exists(os.path.join(outputs_dir, f"{main_base}_final_{counter}.mp4")):
-                                    counter += 1
-                                final_filename = f"{main_base}_final_{counter}.mp4"
+                                    # Generate extension in-process
+                                    ext_generated_video, ext_generated_audio, _ = generate_with_cancellation_check(
+                                        ovi_engine.generate,
+                                        text_prompt=extension_prompt,
+                                        image_path=current_image_path,
+                                        video_frame_height_width=[video_frame_height, video_frame_width],
+                                        seed=current_seed,
+                                        solver_name=solver_name,
+                                        sample_steps=sample_steps,
+                                        shift=shift,
+                                        video_guidance_scale=video_guidance_scale,
+                                        audio_guidance_scale=audio_guidance_scale,
+                                        slg_layer=slg_layer,
+                                        blocks_to_swap=None,
+                                        video_negative_prompt=video_negative_prompt,
+                                        audio_negative_prompt=audio_negative_prompt,
+                                        delete_text_encoder=delete_text_encoder if text_embeddings_cache is None else False,
+                                        no_block_prep=no_block_prep,
+                                        fp8_t5=fp8_t5,
+                                        cpu_only_t5=cpu_only_t5,
+                                        fp8_base_model=fp8_base_model,
+                                        vae_tiled_decode=vae_tiled_decode,
+                                        vae_tile_size=vae_tile_size,
+                                        vae_tile_overlap=vae_tile_overlap,
+                                        text_embeddings_cache=text_embeddings_cache,
+                                    )
+
+                                    # Save extension video with proper naming
+                                    ext_filename = f"{main_base}_ext{ext_idx + 1}.mp4"
+                                    ext_output_path = os.path.join(outputs_dir, ext_filename)
+
+                                    # Check for conflicts and increment if needed
+                                    if os.path.exists(ext_output_path):
+                                        counter = 1
+                                        while os.path.exists(os.path.join(outputs_dir, f"{main_base}_ext{ext_idx + 1}_{counter}.mp4")):
+                                            counter += 1
+                                        ext_filename = f"{main_base}_ext{ext_idx + 1}_{counter}.mp4"
+                                        ext_output_path = os.path.join(outputs_dir, ext_filename)
+
+                                    if no_audio:
+                                        ext_generated_audio = None
+
+                                    save_video(ext_output_path, ext_generated_video, ext_generated_audio, fps=24, sample_rate=16000)
+                                    extension_videos.append(ext_output_path)
+
+                                    # Save used source image for extension
+                                    save_used_source_image(current_image_path, outputs_dir, ext_filename)
+
+                                    current_image_path = extract_last_frame(ext_output_path)  # Extract for next extension
+
+                                    # Save metadata for extension
+                                    if save_metadata:
+                                        ext_generation_params = {
+                                            'text_prompt': extension_prompt,
+                                            'image_path': current_image_path,
+                                            'video_frame_height': video_frame_height,
+                                            'video_frame_width': video_frame_width,
+                                            'aspect_ratio': aspect_ratio,
+                                            'randomize_seed': False,
+                                            'num_generations': 1,
+                                            'solver_name': solver_name,
+                                            'sample_steps': sample_steps,
+                                            'shift': shift,
+                                            'video_guidance_scale': video_guidance_scale,
+                                            'audio_guidance_scale': audio_guidance_scale,
+                                            'slg_layer': slg_layer,
+                                            'blocks_to_swap': blocks_to_swap,
+                                            'cpu_offload': cpu_offload,
+                                            'delete_text_encoder': delete_text_encoder,
+                                            'fp8_t5': fp8_t5,
+                                            'cpu_only_t5': cpu_only_t5,
+                                            'fp8_base_model': fp8_base_model,
+                                            'no_audio': no_audio,
+                                            'no_block_prep': no_block_prep,
+                                            'clear_all': clear_all,
+                                            'vae_tiled_decode': vae_tiled_decode,
+                                            'vae_tile_size': vae_tile_size,
+                                            'vae_tile_overlap': vae_tile_overlap,
+                                            'base_resolution_width': base_resolution_width,
+                                            'base_resolution_height': base_resolution_height,
+                                            'duration_seconds': duration_seconds,
+                                            'video_negative_prompt': video_negative_prompt,
+                                            'audio_negative_prompt': audio_negative_prompt,
+                                            'is_batch': False,
+                                            'is_extension': True,
+                                            'extension_index': ext_idx + 1,
+                                        }
+                                        save_generation_metadata(ext_output_path, ext_generation_params, current_seed)
+
+                                    print(f"[VIDEO EXTENSION] Extension {ext_idx + 1} saved: {ext_filename}")
+
+                            # Combine all videos (main + extensions) into final video
+                            if len(extension_videos) > 1:
+                                # Construct final filename
+                                final_filename = f"{main_base}_final.mp4"
                                 final_path = os.path.join(outputs_dir, final_filename)
 
-                            if combine_videos(extension_videos, final_path):
-                                print(f"[VIDEO EXTENSION] Combined video saved: {final_filename}")
-                                last_output_path = final_path
-                            else:
-                                print("[VIDEO EXTENSION] Failed to combine videos")
-                    else:
-                        print("[VIDEO EXTENSION] Failed to extract last frame, skipping extensions")
+                                # Check for conflicts and increment if needed
+                                if os.path.exists(final_path):
+                                    counter = 1
+                                    while os.path.exists(os.path.join(outputs_dir, f"{main_base}_final_{counter}.mp4")):
+                                        counter += 1
+                                    final_filename = f"{main_base}_final_{counter}.mp4"
+                                    final_path = os.path.join(outputs_dir, final_filename)
+
+                                if combine_videos(extension_videos, final_path):
+                                    print(f"[VIDEO EXTENSION] Combined video saved: {final_filename}")
+                                    last_output_path = final_path
+                                else:
+                                    print("[VIDEO EXTENSION] Failed to combine videos")
+                        else:
+                            print("[VIDEO EXTENSION] Failed to extract last frame, skipping extensions")
 
         # Calculate and log total generation time
         generation_end_time = time.time()
