@@ -301,6 +301,29 @@ def generate_video(
     import time
     generation_start_time = time.time()
 
+    # IMPORTANT: Recalculate video dimensions from base resolution and aspect ratio if needed
+    # This ensures consistency between base resolution and actual video dimensions
+    parsed_dims = _parse_resolution_from_label(aspect_ratio)
+    if parsed_dims:
+        # Aspect ratio has explicit dimensions, use them
+        recalc_width, recalc_height = parsed_dims
+        if recalc_width != video_frame_width or recalc_height != video_frame_height:
+            print(f"[RESOLUTION FIX] Updating resolution from {video_frame_width}x{video_frame_height} to {recalc_width}x{recalc_height} (from aspect ratio)")
+            video_frame_width, video_frame_height = recalc_width, recalc_height
+    else:
+        # Calculate from base resolution and aspect ratio name
+        base_width = _coerce_positive_int(base_resolution_width) or 720
+        base_height = _coerce_positive_int(base_resolution_height) or 720
+        current_ratios = get_common_aspect_ratios(base_width, base_height)
+        
+        # Extract ratio name from aspect_ratio (e.g., "16:9" from "16:9 - 992x512px")
+        ratio_name = _extract_ratio_name(aspect_ratio)
+        if ratio_name and ratio_name in current_ratios:
+            recalc_width, recalc_height = current_ratios[ratio_name]
+            if recalc_width != video_frame_width or recalc_height != video_frame_height:
+                print(f"[RESOLUTION FIX] Recalculated resolution from base {base_width}x{base_height} and aspect {ratio_name}: {recalc_width}x{recalc_height} (was {video_frame_width}x{video_frame_height})")
+                video_frame_width, video_frame_height = recalc_width, recalc_height
+
     # Debug: Log current generation parameters
     print("=" * 80)
     print("VIDEO GENERATION STARTED")
@@ -1773,6 +1796,25 @@ def process_batch_generation(
             img_status = "with image" if img_path else "text-only"
             print(f"  - {base_name}: {img_status}")
 
+        # IMPORTANT: Recalculate video dimensions from base resolution and aspect ratio
+        # This ensures auto-cropping uses the correct target resolution
+        parsed_dims = _parse_resolution_from_label(aspect_ratio)
+        if parsed_dims:
+            # Aspect ratio has explicit dimensions, use them
+            video_frame_width, video_frame_height = parsed_dims
+        else:
+            # Calculate from base resolution and aspect ratio name
+            base_width = _coerce_positive_int(base_resolution_width) or 720
+            base_height = _coerce_positive_int(base_resolution_height) or 720
+            current_ratios = get_common_aspect_ratios(base_width, base_height)
+            
+            # Extract ratio name from aspect_ratio (e.g., "16:9" from "16:9 - 992x512px")
+            ratio_name = _extract_ratio_name(aspect_ratio)
+            if ratio_name and ratio_name in current_ratios:
+                video_frame_width, video_frame_height = current_ratios[ratio_name]
+                print(f"[BATCH] Recalculated resolution from base {base_width}x{base_height} and aspect {ratio_name}: {video_frame_width}x{video_frame_height}")
+            # else keep the original video_frame_width/height from parameters
+        
         # Only initialize engine if we're not using subprocess mode (clear_all=False)
         # When clear_all=True, all batch generations run in subprocesses, so main process doesn't need models
         if clear_all:
@@ -1838,7 +1880,20 @@ def process_batch_generation(
             print(f"  Image: {'Yes' if image_path else 'No'}")
 
             # Apply auto cropping if enabled and image exists
-            final_image_path = apply_auto_crop_if_enabled(image_path, auto_crop_image, video_frame_width, video_frame_height)
+            # For batch processing with auto-crop, let each image auto-detect its own aspect ratio
+            # by passing None for target dimensions (each image in batch may have different aspect ratios)
+            if auto_crop_image and image_path:
+                final_image_path, detected_width, detected_height = apply_auto_crop_if_enabled(
+                    image_path, auto_crop_image, None, None, return_dimensions=True
+                )
+                # Use the auto-detected dimensions for this specific image
+                batch_video_width = detected_width if detected_width else video_frame_width
+                batch_video_height = detected_height if detected_height else video_frame_height
+            else:
+                # If auto-crop is disabled, use the configured resolution
+                final_image_path = apply_auto_crop_if_enabled(image_path, auto_crop_image, video_frame_width, video_frame_height)
+                batch_video_width = video_frame_width
+                batch_video_height = video_frame_height
 
             # Check if output already exists (for skip logic)
             expected_output = os.path.join(outputs_dir, f"{base_name}_0001.mp4")
@@ -1866,8 +1921,8 @@ def process_batch_generation(
                     single_gen_params = {
                         'text_prompt': text_prompt,
                         'image': final_image_path,
-                        'video_frame_height': video_frame_height,
-                        'video_frame_width': video_frame_width,
+                        'video_frame_height': batch_video_height,  # Use detected dimensions
+                        'video_frame_width': batch_video_width,    # Use detected dimensions
                         'video_seed': current_seed,
                         'solver_name': solver_name,
                         'sample_steps': sample_steps,
@@ -1896,7 +1951,7 @@ def process_batch_generation(
                         'base_resolution_width': base_resolution_width,
                         'base_resolution_height': base_resolution_height,
                         'duration_seconds': duration_seconds,
-                        'auto_crop_image': auto_crop_image,
+                        'auto_crop_image': False,  # Image already cropped in main process
                         'base_filename': base_name,  # Use base name for batch processing
                         'output_dir': outputs_dir,  # Pass output directory to subprocess
                     }
@@ -1925,7 +1980,7 @@ def process_batch_generation(
                     ovi_engine.generate,
                     text_prompt=text_prompt,
                     image_path=final_image_path,
-                    video_frame_height_width=[video_frame_height, video_frame_width],
+                    video_frame_height_width=[batch_video_height, batch_video_width],  # Use detected dimensions
                     seed=current_seed,
                     solver_name=solver_name,
                     sample_steps=sample_steps,
@@ -1961,8 +2016,8 @@ def process_batch_generation(
                         generation_params = {
                             'text_prompt': text_prompt,
                             'image_path': final_image_path,
-                            'video_frame_height': video_frame_height,
-                            'video_frame_width': video_frame_width,
+                            'video_frame_height': batch_video_height,  # Use actual dimensions used for this image
+                            'video_frame_width': batch_video_width,    # Use actual dimensions used for this image
                             'aspect_ratio': aspect_ratio,
                             'randomize_seed': randomize_seed,
                             'num_generations': num_generations,
@@ -2007,7 +2062,10 @@ def process_batch_generation(
         print(f"  Output directory: {outputs_dir}")
         print("=" * 80)
 
-        return last_output_path
+        # Return None instead of path to avoid Gradio InvalidPathError when using custom output directory
+        # Gradio cannot handle paths outside its allowed directories (working dir, temp dir)
+        # The user can access the files directly from the output folder
+        return None
 
     except Exception as e:
         error_msg = str(e)
@@ -2056,13 +2114,24 @@ def load_i2v_example_with_resolution(prompt, img_path):
         print(f"Error loading I2V example: {e}")
         return (prompt, img_path, gr.update(), gr.update(), gr.update(), img_path)
 
-def apply_auto_crop_if_enabled(image_path, auto_crop_image, target_width=None, target_height=None):
-    """Apply auto cropping to image if enabled. Returns the final image path to use."""
+def apply_auto_crop_if_enabled(image_path, auto_crop_image, target_width=None, target_height=None, return_dimensions=False):
+    """Apply auto cropping to image if enabled. Returns the final image path to use.
+    
+    When target_width and target_height are provided, they are used as the target resolution.
+    This is the case when the user has manually set dimensions or when called from generation.
+    
+    When they are None, the function auto-detects the closest aspect ratio from the image.
+    
+    Args:
+        return_dimensions: If True, returns (image_path, width, height) instead of just image_path
+    """
     if not auto_crop_image or image_path is None or not os.path.exists(image_path):
+        if return_dimensions:
+            return image_path, target_width, target_height
         return image_path
 
     try:
-        print("[DEBUG] Auto-cropping image for generation...")
+        print("[AUTO-CROP] Auto-cropping image for generation...")
         img = Image.open(image_path)
         iw, ih = img.size
         if ih > 0 and iw > 0:
@@ -2073,7 +2142,7 @@ def apply_auto_crop_if_enabled(image_path, auto_crop_image, target_width=None, t
                 return w / h
 
             if target_width and target_height:
-                # Use provided target dimensions
+                # Use provided target dimensions (user has manually set them or they come from UI)
                 target_w, target_h = target_width, target_height
                 closest_key = None
                 # Find the closest standard aspect ratio for logging
@@ -2083,12 +2152,12 @@ def apply_auto_crop_if_enabled(image_path, auto_crop_image, target_width=None, t
                         break
                 if not closest_key:
                     closest_key = f"{target_w}x{target_h}"
+                print(f"[AUTO-CROP] Using provided resolution: {target_w}x{target_h} ({closest_key})")
             else:
-                # Calculate from standard aspect ratios
+                # Auto-detect from image dimensions
                 closest_key = min(ASPECT_RATIOS.keys(), key=lambda k: abs(get_ratio_value(k) - aspect))
                 target_w, target_h = ASPECT_RATIOS[closest_key]
-
-            print(f"[DEBUG] Detected aspect ratio: {closest_key} -> {target_w}x{target_h}")
+                print(f"[AUTO-CROP] Image {iw}×{ih} (aspect {aspect:.3f}) → Auto-detected ratio: {closest_key} → {target_w}×{target_h}")
 
             target_aspect = target_w / target_h
             image_aspect = iw / ih
@@ -2111,13 +2180,20 @@ def apply_auto_crop_if_enabled(image_path, auto_crop_image, target_width=None, t
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             cropped_path = os.path.join(tmp_dir, f"cropped_{timestamp}.png")
             cropped.save(cropped_path)
-            print(f"[DEBUG] Cropped image saved to: {cropped_path}")
+            print(f"[AUTO-CROP] Cropped image saved to: {cropped_path}")
+            
+            if return_dimensions:
+                return cropped_path, target_w, target_h
             return cropped_path
         else:
-            print("[DEBUG] Invalid image dimensions, using original")
+            print("[AUTO-CROP] Invalid image dimensions, using original")
+            if return_dimensions:
+                return image_path, target_width, target_height
             return image_path
     except Exception as e:
-        print(f"[DEBUG] Auto-crop failed: {e}, using original image")
+        print(f"[AUTO-CROP] Auto-crop failed: {e}, using original image")
+        if return_dimensions:
+            return image_path, target_width, target_height
         return image_path
 
 def update_cropped_image_only(image_path, auto_crop_image, video_width, video_height):
@@ -2316,7 +2392,7 @@ def update_image_crop_and_labels(image_path, auto_crop_image, video_width, video
         )
 
 def on_image_upload(image_path, auto_crop_image, video_width, video_height):
-    """Called when user uploads a new image."""
+    """Called when user uploads a new image - auto-detects aspect ratio from image dimensions."""
     if image_path is None:
         return (
             gr.update(visible=False, value=None),
@@ -2329,8 +2405,114 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height):
             None
         )
 
-    # Call the shared update function
-    return update_image_crop_and_labels(image_path, auto_crop_image, video_width, video_height)
+    if not os.path.exists(image_path):
+        return (
+            gr.update(visible=False, value=None),
+            gr.update(value="", visible=False),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(value="", visible=False),
+            image_path
+        )
+
+    try:
+        # Auto-detect aspect ratio from actual image dimensions
+        img = Image.open(image_path)
+        iw, ih = img.size
+        
+        input_res_label = f"**Input Image Resolution:** {iw}×{ih}px"
+        
+        if ih == 0 or iw == 0:
+            return (
+                gr.update(visible=False, value=None),
+                gr.update(value=input_res_label, visible=True),
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                gr.update(value="", visible=False),
+                image_path
+            )
+        
+        # Calculate aspect ratio from IMAGE dimensions (not from video_width/video_height)
+        aspect = iw / ih
+        
+        # Find closest aspect ratio match
+        def get_ratio_value(ratio_str):
+            w, h = map(float, ratio_str.split(':'))
+            return w / h
+        
+        closest_key = min(ASPECT_RATIOS.keys(), key=lambda k: abs(get_ratio_value(k) - aspect))
+        target_w, target_h = ASPECT_RATIOS[closest_key]
+        
+        print(f"[AUTO-DETECT] Image {iw}×{ih} (aspect {aspect:.3f}) → Closest ratio: {closest_key} → {target_w}×{target_h}")
+        
+        # Calculate cropped image
+        target_aspect = target_w / target_h
+        image_aspect = iw / ih
+        
+        # Center crop to target aspect
+        if image_aspect > target_aspect:
+            crop_w = int(ih * target_aspect)
+            left = (iw - crop_w) // 2
+            box = (left, 0, left + crop_w, ih)
+        else:
+            crop_h = int(iw / target_aspect)
+            top = (ih - crop_h) // 2
+            box = (0, top, iw, top + crop_h)
+        
+        cropped = img.crop(box).resize((target_w, target_h), Image.Resampling.LANCZOS)
+        
+        # Save to temp dir
+        tmp_dir = os.path.join(os.path.dirname(__file__), "temp")
+        os.makedirs(tmp_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        cropped_path = os.path.join(tmp_dir, f"cropped_{timestamp}.png")
+        cropped.save(cropped_path)
+        
+        output_res_label = f"**Cropped Image Resolution:** {target_w}×{target_h}px"
+        
+        # Format aspect ratio for dropdown
+        aspect_display = _format_ratio_choice(closest_key, ASPECT_RATIOS[closest_key])
+        aspect_choices = [_format_ratio_choice(name, dims) for name, dims in get_common_aspect_ratios(target_w, target_h).items()]
+        if aspect_display not in aspect_choices:
+            aspect_choices = [aspect_display] + aspect_choices
+        
+        if auto_crop_image:
+            return (
+                gr.update(visible=True, value=cropped_path),
+                gr.update(value=input_res_label, visible=True),
+                gr.update(value=aspect_display, choices=aspect_choices),  # Update aspect ratio
+                gr.update(value=target_w),  # Update width
+                gr.update(value=target_h),  # Update height
+                gr.update(value=output_res_label, visible=True),
+                cropped_path
+            )
+        else:
+            return (
+                gr.update(visible=False, value=None),
+                gr.update(value=input_res_label, visible=True),
+                gr.update(value=aspect_display, choices=aspect_choices),  # Still update aspect ratio
+                gr.update(value=target_w),  # Still update width
+                gr.update(value=target_h),  # Still update height
+                gr.update(value="", visible=False),
+                image_path
+            )
+    
+    except Exception as e:
+        print(f"Error in on_image_upload: {e}")
+        return (
+            gr.update(visible=False, value=None),
+            gr.update(value="", visible=False),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(value="", visible=False),
+            image_path
+        )
 
 theme = gr.themes.Soft()
 theme.font = [gr.themes.GoogleFont("Inter"), "Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
