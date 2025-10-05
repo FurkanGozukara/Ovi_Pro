@@ -397,6 +397,7 @@ class OviFusionEngine:
                     vae_tiled_decode=False,
                     vae_tile_size=32,
                     vae_tile_overlap=8,
+                    force_exact_resolution=False,
                     cancellation_check=None
                 ):
 
@@ -484,13 +485,42 @@ class OviFusionEngine:
 
             first_frame = None
             image = None
+
+            # Determine video dimensions first
             if is_i2v and not self.image_model:
-                # Load first frame from path
-                first_frame = preprocess_image_tensor(image_path, self.device, self.target_dtype)
-            else:   
+                # For I2V, video dimensions come from user input when force_exact_resolution is enabled
+                if force_exact_resolution and video_frame_height_width is not None:
+                    video_h, video_w = video_frame_height_width
+                else:
+                    # For regular I2V, dimensions will be determined from the image
+                    video_h, video_w = None, None  # Will be set later from image
+            else:
+                # For T2V, dimensions come from user input
                 assert video_frame_height_width is not None, f"If mode=t2v or t2i2v, video_frame_height_width must be provided."
                 video_h, video_w = video_frame_height_width
-                video_h, video_w = snap_hw_to_multiple_of_32(video_h, video_w, area = 720 * 720)
+                # Use exact resolution if requested, otherwise force to 720*720 area and snap to 32
+                if not force_exact_resolution:
+                    # Force to 720*720 area and snap to multiples of 32
+                    video_h, video_w = snap_hw_to_multiple_of_32(video_h, video_w, area=720 * 720)
+
+            if is_i2v and not self.image_model:
+                # Load first frame from path
+                if force_exact_resolution and video_h is not None and video_w is not None:
+                    # Load image without resizing, then manually resize to target dimensions
+                    first_frame = preprocess_image_tensor(image_path, self.device, self.target_dtype, resize_total_area=None)
+                    # Resize the tensor to match video dimensions
+                    import torch.nn.functional as F
+                    target_h, target_w = video_h, video_w
+                    current_h, current_w = first_frame.shape[-2], first_frame.shape[-1]
+                    if current_h != target_h or current_w != target_w:
+                        first_frame = F.interpolate(first_frame, size=(target_h, target_w), mode='bilinear', align_corners=False)
+                else:
+                    # Use default resizing to 720*720 area
+                    first_frame = preprocess_image_tensor(image_path, self.device, self.target_dtype)
+                    # Set video dimensions from the processed image
+                    video_h, video_w = first_frame.shape[-2], first_frame.shape[-1]
+
+            if video_h is not None and video_w is not None:
                 video_latent_h, video_latent_w = video_h // 16, video_w // 16
                 if self.image_model is not None:
                     # this already means t2v mode with image model
@@ -510,9 +540,12 @@ class OviFusionEngine:
             if is_i2v:
                 with torch.no_grad():
                     self._ensure_vaes_on_device(self.device)
-                    latents_images = self.vae_model_video.wrapped_encode(first_frame[:, :, None]).to(self.target_dtype).squeeze(0) # c 1 h w 
+                    latents_images = self.vae_model_video.wrapped_encode(first_frame[:, :, None]).to(self.target_dtype).squeeze(0) # c 1 h w
                 latents_images = latents_images.to(self.target_dtype)
-                video_latent_h, video_latent_w = latents_images.shape[2], latents_images.shape[3]
+                # For I2V with force_exact_resolution, use the predetermined latent dimensions
+                # Otherwise, use the dimensions from the encoded latents
+                if not (force_exact_resolution and video_latent_h is not None and video_latent_w is not None):
+                    video_latent_h, video_latent_w = latents_images.shape[2], latents_images.shape[3]
                 if self.cpu_offload:
                     self._offload_vaes_to_cpu()
 

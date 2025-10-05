@@ -285,10 +285,9 @@ def generate_video(
     vae_tiled_decode,
     vae_tile_size,
     vae_tile_overlap,
+    force_exact_resolution,
 ):
     global ovi_engine
-
-    print(f"[GENERATE_VIDEO] Called with clear_all={clear_all}, num_generations={num_generations}")
 
     # Reset cancellation flag at the start of each generation request
     reset_cancellation()
@@ -392,6 +391,7 @@ def generate_video(
                         'vae_tiled_decode': vae_tiled_decode,
                         'vae_tile_size': vae_tile_size,
                         'vae_tile_overlap': vae_tile_overlap,
+                        'force_exact_resolution': force_exact_resolution,
                     }
 
                 run_generation_subprocess(single_gen_params)
@@ -433,6 +433,7 @@ def generate_video(
                 vae_tiled_decode=vae_tiled_decode,
                 vae_tile_size=vae_tile_size,
                 vae_tile_overlap=vae_tile_overlap,
+                force_exact_resolution=force_exact_resolution,
             )
 
             # Get next available filename in sequential format
@@ -473,6 +474,7 @@ def generate_video(
                     'vae_tiled_decode': vae_tiled_decode,
                     'vae_tile_size': vae_tile_size,
                     'vae_tile_overlap': vae_tile_overlap,
+                    'force_exact_resolution': force_exact_resolution,
                     'video_negative_prompt': video_negative_prompt,
                     'audio_negative_prompt': audio_negative_prompt,
                     'is_batch': False
@@ -645,7 +647,7 @@ def save_preset(preset_name, current_preset,
                 blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
                 video_negative_prompt, audio_negative_prompt,
                 batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
-                vae_tiled_decode, vae_tile_size, vae_tile_overlap):
+                vae_tiled_decode, vae_tile_size, vae_tile_overlap, force_exact_resolution):
     """Save current UI state as a preset."""
     try:
         presets_dir = get_presets_dir()
@@ -692,6 +694,7 @@ def save_preset(preset_name, current_preset,
             "vae_tiled_decode": vae_tiled_decode,
             "vae_tile_size": vae_tile_size,
             "vae_tile_overlap": vae_tile_overlap,
+            "force_exact_resolution": force_exact_resolution,
             "saved_at": datetime.now().isoformat()
         }
 
@@ -719,7 +722,7 @@ def load_preset(preset_name):
     """Load a preset and return all UI values."""
     try:
         if not preset_name:
-            return [gr.update() for _ in range(30)] + [gr.update(value=None)] + ["No preset selected"]
+            return [gr.update() for _ in range(31)] + [gr.update(value=None)] + ["No preset selected"]
 
         presets_dir = get_presets_dir()
         preset_file = os.path.join(presets_dir, f"{preset_name}.json")
@@ -768,12 +771,13 @@ def load_preset(preset_name):
             gr.update(value=preset_data.get("vae_tiled_decode", False)),
             gr.update(value=preset_data.get("vae_tile_size", 32)),
             gr.update(value=preset_data.get("vae_tile_overlap", 8)),
+            gr.update(value=preset_data.get("force_exact_resolution", False)),
             gr.update(value=preset_name),  # Update dropdown value
             f"Preset '{preset_name}' loaded successfully!"
         )
 
     except Exception as e:
-        return [gr.update() for _ in range(30)] + [gr.update(value=None)] + [f"Error loading preset: {e}"]
+        return [gr.update() for _ in range(31)] + [gr.update(value=None)] + [f"Error loading preset: {e}"]
 
 def initialize_app_with_auto_load():
     """Initialize app with preset dropdown choices and auto-load last preset or VRAM-based preset."""
@@ -896,13 +900,14 @@ def initialize_app_with_auto_load():
             vae_tiled_decode_update,  # vae_tiled_decode (potentially modified)
             gr.update(),  # vae_tile_size
             gr.update(),  # vae_tile_overlap
+            gr.update(),  # force_exact_resolution
             status_message  # status message
         )
 
     except Exception as e:
         print(f"Warning: Could not initialize app with auto-load: {e}")
         presets = get_available_presets()
-        return gr.update(choices=presets, value=None), *[gr.update() for _ in range(30)], ""
+        return gr.update(choices=presets, value=None), *[gr.update() for _ in range(31)], ""
 
 def initialize_app():
     """Initialize app with preset dropdown choices."""
@@ -948,6 +953,7 @@ VAE OPTIMIZATION:
 - Tiled VAE Decode: {generation_params.get('vae_tiled_decode', False)}
 - VAE Tile Size: {generation_params.get('vae_tile_size', 'N/A')}
 - VAE Tile Overlap: {generation_params.get('vae_tile_overlap', 'N/A')}
+- Force Exact Resolution: {generation_params.get('force_exact_resolution', False)}
 
 NEGATIVE PROMPTS:
 - Video: {generation_params.get('video_negative_prompt', 'N/A')}
@@ -1171,6 +1177,7 @@ def process_batch_generation(
                         'vae_tiled_decode': vae_tiled_decode,
                         'vae_tile_size': vae_tile_size,
                         'vae_tile_overlap': vae_tile_overlap,
+                        'force_exact_resolution': force_exact_resolution,
                     }
 
                     success = run_generation_subprocess(single_gen_params)
@@ -1193,28 +1200,29 @@ def process_batch_generation(
                 try:
                     # Use cancellable generation wrapper for interruptible generation
                     generated_video, generated_audio, _ = generate_with_cancellation_check(
-                        ovi_engine.generate,
-                        text_prompt=text_prompt,
-                        image_path=image_path,
-                        video_frame_height_width=[video_frame_height, video_frame_width],
-                        seed=current_seed,
-                        solver_name=solver_name,
-                        sample_steps=sample_steps,
-                        shift=shift,
-                        video_guidance_scale=video_guidance_scale,
-                        audio_guidance_scale=audio_guidance_scale,
-                        slg_layer=slg_layer,
-                        blocks_to_swap=None,
-                        video_negative_prompt=video_negative_prompt,
-                        audio_negative_prompt=audio_negative_prompt,
-                        delete_text_encoder=delete_text_encoder,
-                        no_block_prep=no_block_prep,
-                        fp8_t5=fp8_t5,
-                        cpu_only_t5=cpu_only_t5,
-                        vae_tiled_decode=vae_tiled_decode,
-                        vae_tile_size=vae_tile_size,
-                        vae_tile_overlap=vae_tile_overlap,
-                    )
+                    ovi_engine.generate,
+                    text_prompt=text_prompt,
+                    image_path=image_path,
+                    video_frame_height_width=[video_frame_height, video_frame_width],
+                    seed=current_seed,
+                    solver_name=solver_name,
+                    sample_steps=sample_steps,
+                    shift=shift,
+                    video_guidance_scale=video_guidance_scale,
+                    audio_guidance_scale=audio_guidance_scale,
+                    slg_layer=slg_layer,
+                    blocks_to_swap=None,
+                    video_negative_prompt=video_negative_prompt,
+                    audio_negative_prompt=audio_negative_prompt,
+                    delete_text_encoder=delete_text_encoder,
+                    no_block_prep=no_block_prep,
+                    fp8_t5=fp8_t5,
+                    cpu_only_t5=cpu_only_t5,
+                    vae_tiled_decode=vae_tiled_decode,
+                    vae_tile_size=vae_tile_size,
+                    vae_tile_overlap=vae_tile_overlap,
+                    force_exact_resolution=force_exact_resolution,
+                )
 
                     # Get filename with base_name prefix
                     output_filename = get_next_filename(outputs_dir, base_filename=base_name)
@@ -1254,6 +1262,7 @@ def process_batch_generation(
                             'vae_tiled_decode': vae_tiled_decode,
                             'vae_tile_size': vae_tile_size,
                             'vae_tile_overlap': vae_tile_overlap,
+                            'force_exact_resolution': force_exact_resolution,
                             'video_negative_prompt': video_negative_prompt,
                             'audio_negative_prompt': audio_negative_prompt,
                             'is_batch': True
@@ -1313,7 +1322,7 @@ def load_i2v_example_with_resolution(prompt, img_path):
         print(f"Error loading I2V example: {e}")
         return (prompt, img_path, gr.update(), gr.update(), gr.update(), img_path)
 
-def on_image_upload(image_path, auto_crop_image):
+def on_image_upload(image_path, auto_crop_image, video_width, video_height, force_exact_resolution):
     if image_path is None:
         return (
             gr.update(visible=False, value=None),
@@ -1323,20 +1332,31 @@ def on_image_upload(image_path, auto_crop_image):
             gr.update(),
             None
         )
-    
+
     try:
         img = Image.open(image_path)
         iw, ih = img.size
         if ih == 0 or iw == 0:
             raise ValueError("Invalid image dimensions")
-        aspect = iw / ih
-        
-        closest_key = min(ASPECT_RATIOS.keys(), key=lambda k: abs(ASPECT_RATIOS[k][0] / ASPECT_RATIOS[k][1] - aspect))
-        target_w, target_h = ASPECT_RATIOS[closest_key]
+
+        # If force_exact_resolution is enabled, use the user-specified dimensions (snapped to 32px)
+        if force_exact_resolution and video_width and video_height:
+            # Snap to nearest multiples of 32 for compatibility
+            target_w = max(32, (video_width // 32) * 32)
+            target_h = max(32, (video_height // 32) * 32)
+            print(f"[AUTO-CROP] Force exact resolution enabled: using {target_w}x{target_h} (snapped to 32px)")
+        else:
+            # Otherwise, find closest aspect ratio match
+            aspect = iw / ih
+            closest_key = min(ASPECT_RATIOS.keys(), key=lambda k: abs(ASPECT_RATIOS[k][0] / ASPECT_RATIOS[k][1] - aspect))
+            target_w, target_h = ASPECT_RATIOS[closest_key]
+            print(f"[AUTO-CROP] Using aspect ratio match: {closest_key} -> {target_w}x{target_h}")
+
         target_aspect = target_w / target_h
-        
+        image_aspect = iw / ih
+
         # Center crop to target aspect
-        if aspect > target_aspect:
+        if image_aspect > target_aspect:
             # Image is wider, crop sides
             crop_w = int(ih * target_aspect)
             left = (iw - crop_w) // 2
@@ -1346,20 +1366,26 @@ def on_image_upload(image_path, auto_crop_image):
             crop_h = int(iw / target_aspect)
             top = (ih - crop_h) // 2
             box = (0, top, iw, top + crop_h)
-        
+
         cropped = img.crop(box).resize((target_w, target_h), Image.Resampling.LANCZOS)
-        
+
         # Save to temp dir
         tmp_dir = os.path.join(os.path.dirname(__file__), "temp")
         os.makedirs(tmp_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         cropped_path = os.path.join(tmp_dir, f"cropped_{timestamp}.png")
         cropped.save(cropped_path)
-        
+
         if auto_crop_image:
+            # Return the appropriate aspect ratio key if not using force_exact_resolution
+            if force_exact_resolution:
+                aspect_ratio_value = gr.update()  # Don't change aspect ratio dropdown
+            else:
+                aspect_ratio_value = gr.update(value=closest_key)
+
             return (
                 gr.update(visible=True, value=cropped_path),
-                gr.update(value=closest_key),
+                aspect_ratio_value,
                 gr.update(value=target_w),
                 gr.update(value=target_h),
                 cropped_path
@@ -1386,7 +1412,7 @@ def on_image_upload(image_path, auto_crop_image):
 theme = gr.themes.Soft()
 theme.font = [gr.themes.GoogleFont("Inter"), "Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v3 : https://www.patreon.com/posts/140393220")
+    gr.Markdown("# Ovi Pro SECourses Premium App v3.1 : https://www.patreon.com/posts/140393220")
 
     image_to_use = gr.State(value=None)
 
@@ -1514,7 +1540,12 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                                 value=True,
                                 info="Run each generation as separate process to clear VRAM/RAM (recommended)"
                             )
-                        
+                            force_exact_resolution = gr.Checkbox(
+                                label="Force Exact Resolution",
+                                value=False,
+                                info="Bypass area constraint and use exact width/height (may require more VRAM)"
+                            )
+
                         # T5 Text Encoder Options (all in one row)
                         with gr.Row():
                             delete_text_encoder = gr.Checkbox(
@@ -1984,20 +2015,20 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             gr.Checkbox(value=False, visible=False), cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
             no_audio, gr.Checkbox(value=False, visible=False),
             num_generations, randomize_seed, save_metadata, aspect_ratio, clear_all,
-            vae_tiled_decode, vae_tile_size, vae_tile_overlap,
+            vae_tiled_decode, vae_tile_size, vae_tile_overlap, force_exact_resolution,
         ],
         outputs=[output_path],
     )
 
     image.change(
         fn=on_image_upload,
-        inputs=[image, auto_crop_image],
+        inputs=[image, auto_crop_image, video_width, video_height, force_exact_resolution],
         outputs=[cropped_display, aspect_ratio, video_width, video_height, image_to_use]
     )
 
     auto_crop_image.change(
         fn=on_image_upload,
-        inputs=[image, auto_crop_image],
+        inputs=[image, auto_crop_image, video_width, video_height, force_exact_resolution],
         outputs=[cropped_display, aspect_ratio, video_width, video_height, image_to_use]
     )
 
@@ -2042,7 +2073,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
             video_negative_prompt, audio_negative_prompt,
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
-            vae_tiled_decode, vae_tile_size, vae_tile_overlap,
+            vae_tiled_decode, vae_tile_size, vae_tile_overlap, force_exact_resolution,
         ],
         outputs=[
             preset_dropdown, preset_name,  # Update dropdown, clear name field
@@ -2053,7 +2084,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
             video_negative_prompt, audio_negative_prompt,
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
-            vae_tiled_decode, vae_tile_size, vae_tile_overlap,
+            vae_tiled_decode, vae_tile_size, vae_tile_overlap, force_exact_resolution,
             gr.Textbox(visible=False)  # status message
         ],
     )
@@ -2069,7 +2100,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
             video_negative_prompt, audio_negative_prompt,
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
-            vae_tiled_decode, vae_tile_size, vae_tile_overlap,
+            vae_tiled_decode, vae_tile_size, vae_tile_overlap, force_exact_resolution,
             preset_dropdown, gr.Textbox(visible=False)  # Update current preset, status message
         ],
     )
@@ -2086,7 +2117,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
             video_negative_prompt, audio_negative_prompt,
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
-            vae_tiled_decode, vae_tile_size, vae_tile_overlap,
+            vae_tiled_decode, vae_tile_size, vae_tile_overlap, force_exact_resolution,
             preset_dropdown, gr.Textbox(visible=False)  # Update current preset, status message
         ],
     )
@@ -2111,7 +2142,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
             video_negative_prompt, audio_negative_prompt,
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
-            vae_tiled_decode, vae_tile_size, vae_tile_overlap,
+            vae_tiled_decode, vae_tile_size, vae_tile_overlap, force_exact_resolution,
             gr.Textbox(visible=False)  # status message
         ],
     )

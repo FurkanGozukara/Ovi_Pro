@@ -29,5 +29,6 @@
   "vae_tiled_decode": false,
   "vae_tile_size": 28,
   "vae_tile_overlap": 8,
-  "saved_at": "2025-10-05T01:19:25.329094"
+  "force_exact_resolution": true,
+  "saved_at": "2025-10-05T03:21:33.490796"
 }
