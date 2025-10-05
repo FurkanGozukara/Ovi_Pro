@@ -56,6 +56,9 @@ class OviFusionEngine:
         self.fp8_t5 = False
         self.cpu_only_t5 = False
         
+        # Fusion Model FP8 configuration (set during first generation)
+        self.fp8_base_model = False
+        
         # VAE Tiled Decoding Configuration
         self.vae_tiled_decode = False
         self.vae_tile_size = 32  # Latent space tile size (32 latent = 512 pixels after 16x upscale)
@@ -314,6 +317,79 @@ class OviFusionEngine:
             after_load_vram = torch.cuda.memory_allocated(self.device) / 1e9
             print(f"VRAM after loading to CPU: {after_load_vram:.2f} GB (should be ~0)")
         
+        # Step 3.5: Apply FP8 optimization if enabled (BEFORE moving to device!)
+        if self.fp8_base_model:
+            print("=" * 80)
+            print("APPLYING FP8 OPTIMIZATION TO FUSION MODEL")
+            print("  Target: Video + Audio Transformer Blocks")
+            print("  Format: FP8 E4M3 with per-block scaling (block_size=64)")
+            print("  Expected VRAM savings: ~50% for transformer weights")
+            print("=" * 80)
+            
+            # Check for cached FP8 checkpoint
+            cache_path = os.path.join(self.config.ckpt_dir, "Ovi", "model_fp8_scaled.safetensors")
+            
+            if os.path.exists(cache_path):
+                print("[FP8 CACHE] Loading cached FP8 checkpoint...")
+                from ovi.utils.fp8_fusion_optimization_utils import (
+                    load_fusion_fp8_checkpoint,
+                    apply_fusion_fp8_monkey_patch
+                )
+                
+                import time
+                load_start = time.perf_counter()
+                
+                success = load_fusion_fp8_checkpoint(model, cache_path)
+                
+                if success:
+                    # Apply monkey patches for FP8 forward pass
+                    model = apply_fusion_fp8_monkey_patch(model)
+                    
+                    load_time = time.perf_counter() - load_start
+                    print(f"[FP8 CACHE] Loaded and patched cached FP8 checkpoint in {load_time:.2f}s")
+                    print("[FP8] Fusion model FP8 optimization complete (from cache)")
+                else:
+                    print("[FP8 CACHE] Cache load failed, falling back to quantization...")
+                    # Fall through to quantization below
+                    success = False
+            else:
+                print(f"[FP8 CACHE] No cache found at {cache_path}")
+                success = False
+            
+            if not success:
+                print("[FP8] Quantizing Fusion model to FP8 on CPU...")
+                from ovi.utils.fp8_fusion_optimization_utils import (
+                    optimize_fusion_model_to_fp8,
+                    apply_fusion_fp8_monkey_patch,
+                    save_fusion_fp8_checkpoint
+                )
+                
+                import time
+                quant_start = time.perf_counter()
+                
+                # Quantize on CPU (avoids VRAM spike)
+                model, fp8_info = optimize_fusion_model_to_fp8(model, device='cpu', block_size=64)
+                
+                quant_time = time.perf_counter() - quant_start
+                print(f"[FP8] Quantization completed in {quant_time:.2f}s")
+                
+                # Apply monkey patches for FP8 forward pass
+                patch_start = time.perf_counter()
+                model = apply_fusion_fp8_monkey_patch(model)
+                patch_time = time.perf_counter() - patch_start
+                print(f"[FP8] Monkey patching completed in {patch_time:.2f}s")
+                
+                # Save to cache for next time
+                save_fusion_fp8_checkpoint(model, cache_path)
+                
+                print("=" * 80)
+                print("FP8 OPTIMIZATION COMPLETE")
+                print(f"  Optimized layers: {fp8_info['optimized_layers']} ({fp8_info['video_layers']} video + {fp8_info['audio_layers']} audio)")
+                print(f"  Model size: {fp8_info['params_before_mb']:.1f} MB -> {fp8_info['params_after_mb']:.1f} MB")
+                print(f"  Compression ratio: {fp8_info['compression_ratio']:.2f}x")
+                print(f"  Memory saved: {fp8_info['params_before_mb'] - fp8_info['params_after_mb']:.1f} MB (~{(1 - fp8_info['compression_ratio']**-1) * 100:.0f}%)")
+                print("=" * 80)
+        
         # Step 4: Enable block swap BEFORE moving to device (critical!)
         if self.blocks_to_swap > 0:
             print(f"Step 4/6: Enabling block swap with {self.blocks_to_swap} blocks...")
@@ -422,6 +498,7 @@ class OviFusionEngine:
                     no_block_prep=False,
                     fp8_t5=False,
                     cpu_only_t5=False,
+                    fp8_base_model=False,
                     vae_tiled_decode=False,
                     vae_tile_size=32,
                     vae_tile_overlap=8,
@@ -437,6 +514,9 @@ class OviFusionEngine:
         # CRITICAL: Set T5 configuration BEFORE any loading!
         self.fp8_t5 = fp8_t5
         self.cpu_only_t5 = cpu_only_t5
+        
+        # CRITICAL: Set Fusion Model FP8 configuration BEFORE any loading!
+        self.fp8_base_model = fp8_base_model
         
         # Set VAE tiled decoding configuration
         self.vae_tiled_decode = vae_tiled_decode
