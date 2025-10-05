@@ -1995,11 +1995,15 @@ def load_i2v_example_with_resolution(prompt, img_path):
 
         closest_key = min(ASPECT_RATIOS.keys(), key=lambda k: abs(get_ratio_value(k) - aspect))
         target_w, target_h = ASPECT_RATIOS[closest_key]
+        aspect_display = _format_ratio_choice(closest_key, ASPECT_RATIOS[closest_key])
+        aspect_choices = [_format_ratio_choice(name, dims) for name, dims in get_common_aspect_ratios(target_w, target_h).items()]
+        if aspect_display not in aspect_choices:
+            aspect_choices = [aspect_display] + aspect_choices
         
         return (
             prompt, 
             img_path,
-            gr.update(value=closest_key),
+            gr.update(value=aspect_display, choices=aspect_choices),
             gr.update(value=target_w),
             gr.update(value=target_h),
             img_path
@@ -2027,12 +2031,21 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height):
         if ih == 0 or iw == 0:
             raise ValueError("Invalid image dimensions")
 
+        closest_key = None
+
         # Always use exact resolution (snapped to 32px for compatibility)
         if video_width and video_height:
             # Snap to nearest multiples of 32 for compatibility
-            target_w = max(32, (video_width // 32) * 32)
-            target_h = max(32, (video_height // 32) * 32)
+            target_w = max(32, (int(video_width) // 32) * 32)
+            target_h = max(32, (int(video_height) // 32) * 32)
             print(f"[AUTO-CROP] Using exact resolution: {target_w}x{target_h} (snapped to 32px)")
+
+            if target_h > 0:
+                aspect = target_w / target_h
+                closest_key = min(
+                    ASPECT_RATIOS.keys(),
+                    key=lambda k: abs((ASPECT_RATIOS[k][0] / ASPECT_RATIOS[k][1]) - aspect)
+                )
         else:
             # Fallback: find closest aspect ratio match
             aspect = iw / ih
@@ -2065,11 +2078,18 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height):
         cropped.save(cropped_path)
 
         if auto_crop_image:
-            # Update aspect ratio dropdown to match detected ratio (with resolution info)
-            # Get current aspect ratios based on the target resolution
-            current_ratios = get_common_aspect_ratios(target_w, target_h)
-            display_value = f"{closest_key} - {current_ratios[closest_key][0]}x{current_ratios[closest_key][1]}px"
-            aspect_ratio_value = gr.update(value=display_value)
+            display_value = None
+            aspect_choices = [_format_ratio_choice(name, dims) for name, dims in get_common_aspect_ratios(target_w, target_h).items()]
+            if closest_key is not None:
+                if closest_key in ASPECT_RATIOS:
+                    display_value = _format_ratio_choice(closest_key, ASPECT_RATIOS[closest_key])
+                if display_value and display_value not in aspect_choices:
+                    aspect_choices = [display_value] + aspect_choices
+            if display_value is None:
+                display_value = _format_custom_choice(target_w, target_h)
+                if display_value not in aspect_choices:
+                    aspect_choices = [display_value] + aspect_choices
+            aspect_ratio_value = gr.update(value=display_value, choices=aspect_choices)
 
             print(f"[DEBUG] on_image_upload returning cropped path: {cropped_path}")
             return (
@@ -2102,7 +2122,7 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height):
 theme = gr.themes.Soft()
 theme.font = [gr.themes.GoogleFont("Inter"), "Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v3.4 : https://www.patreon.com/posts/140393220")
+    gr.Markdown("# Ovi Pro SECourses Premium App v3.5 : https://www.patreon.com/posts/140393220")
 
     image_to_use = gr.State(value=None)
 
