@@ -656,6 +656,8 @@ def get_aspect_ratios(base_width, base_height):
 # For backward compatibility, keep a default ASPECT_RATIOS
 ASPECT_RATIOS = get_aspect_ratios(720, 720)
 
+CUSTOM_ASPECT_PREFIX = "Custom - "
+
 def _coerce_positive_int(value):
     """Safely coerce incoming UI values to positive integers."""
     try:
@@ -679,9 +681,71 @@ def _extract_ratio_name(value):
 def _format_ratio_choice(name, dims):
     return f"{name} - {dims[0]}x{dims[1]}px"
 
+def _format_custom_choice(width, height):
+    try:
+        width_int = int(width)
+        height_int = int(height)
+        if width_int <= 0 or height_int <= 0:
+            raise ValueError
+    except Exception:
+        return f"{CUSTOM_ASPECT_PREFIX}{width}x{height}px"
+    return f"{CUSTOM_ASPECT_PREFIX}{width_int}x{height_int}px"
+
+def _parse_resolution_from_label(value):
+    if not isinstance(value, str):
+        return None
+
+    custom_dims = _parse_custom_choice(value)
+    if custom_dims:
+        return custom_dims
+
+    if " - " not in value:
+        return None
+
+    _, dims_part = value.split(" - ", 1)
+    dims_part = dims_part.strip()
+    if dims_part.endswith("px"):
+        dims_part = dims_part[:-2]
+
+    if "x" not in dims_part:
+        return None
+
+    width_str, height_str = dims_part.split("x", 1)
+    width = _coerce_positive_int(width_str)
+    height = _coerce_positive_int(height_str)
+
+    if width is None or height is None:
+        return None
+
+    return width, height
+
+def _parse_custom_choice(value):
+    if not isinstance(value, str) or not value.startswith(CUSTOM_ASPECT_PREFIX):
+        return None
+
+    remainder = value[len(CUSTOM_ASPECT_PREFIX):]
+    if remainder.endswith("px"):
+        remainder = remainder[:-2]
+
+    if "x" not in remainder:
+        return None
+
+    width_str, height_str = remainder.split("x", 1)
+    width = _coerce_positive_int(width_str)
+    height = _coerce_positive_int(height_str)
+
+    if width is None or height is None:
+        return None
+
+    return width, height
+
 def update_resolution(aspect_ratio, base_resolution_width=720, base_resolution_height=720):
     """Update resolution based on aspect ratio and base resolution."""
     try:
+        custom_dims = _parse_custom_choice(aspect_ratio)
+        if custom_dims:
+            return [custom_dims[0], custom_dims[1]]
+
         base_width = _coerce_positive_int(base_resolution_width)
         base_height = _coerce_positive_int(base_resolution_height)
 
@@ -713,6 +777,13 @@ def update_aspect_ratio_choices(base_resolution_width, base_resolution_height, c
         current_ratios = get_common_aspect_ratios(base_width, base_height)
         choices = [_format_ratio_choice(name, dims) for name, dims in current_ratios.items()]
 
+        custom_dims = _parse_custom_choice(current_aspect_ratio)
+        if custom_dims:
+            selected_value = _format_custom_choice(custom_dims[0], custom_dims[1])
+            if selected_value not in choices:
+                choices = [selected_value] + choices
+            return gr.update(choices=choices, value=selected_value)
+
         ratio_name = _extract_ratio_name(current_aspect_ratio)
         if ratio_name not in current_ratios:
             ratio_name = "16:9" if "16:9" in current_ratios else next(iter(current_ratios))
@@ -722,6 +793,7 @@ def update_aspect_ratio_choices(base_resolution_width, base_resolution_height, c
         if (
             current_aspect_ratio
             and current_aspect_ratio not in choices
+            and not str(current_aspect_ratio).startswith(CUSTOM_ASPECT_PREFIX)
         ):
             choices = [current_aspect_ratio] + choices
 
@@ -729,6 +801,28 @@ def update_aspect_ratio_choices(base_resolution_width, base_resolution_height, c
     except Exception as e:
         print(f"Error updating aspect ratio choices: {e}")
         return gr.update()
+
+def _resolve_aspect_ratio_value(aspect_ratio_label, video_width, video_height):
+    if isinstance(aspect_ratio_label, str) and aspect_ratio_label.startswith(CUSTOM_ASPECT_PREFIX):
+        parsed_custom = _parse_custom_choice(aspect_ratio_label)
+        if parsed_custom:
+            return _format_custom_choice(parsed_custom[0], parsed_custom[1])
+        return aspect_ratio_label
+
+    parsed_dims = _parse_resolution_from_label(aspect_ratio_label)
+    if parsed_dims:
+        return _format_custom_choice(parsed_dims[0], parsed_dims[1])
+
+    ratio_name = _extract_ratio_name(aspect_ratio_label)
+    if ratio_name in ASPECT_RATIOS:
+        return _format_ratio_choice(ratio_name, ASPECT_RATIOS[ratio_name])
+
+    width = _coerce_positive_int(video_width)
+    height = _coerce_positive_int(video_height)
+    if width and height:
+        return _format_custom_choice(width, height)
+
+    return _format_ratio_choice("16:9", ASPECT_RATIOS["16:9"])
 
 def calculate_latent_lengths(duration_seconds):
     """Calculate video_latent_length and audio_latent_length based on duration.
@@ -1012,9 +1106,26 @@ def validate_preset_value(param_name, value):
             value = rule["max"]
 
         # Choice validation
-        if "choices" in rule and value not in rule["choices"]:
-            print(f"[PRESET] Warning: {param_name} value '{value}' not in valid choices {rule['choices']}, using default")
-            value = PRESET_DEFAULTS[param_name]
+        if "choices" in rule:
+            if param_name == "aspect_ratio" and isinstance(value, str):
+                if value in rule["choices"]:
+                    pass
+                elif value.startswith(CUSTOM_ASPECT_PREFIX):
+                    # Allow custom aspect ratios to pass validation as-is
+                    pass
+                elif " - " in value:
+                    ratio_part = value.split(" - ", 1)[0]
+                    if ratio_part in rule["choices"]:
+                        value = ratio_part
+                    else:
+                        print(f"[PRESET] Warning: {param_name} value '{value}' not recognized, using default")
+                        value = PRESET_DEFAULTS[param_name]
+                else:
+                    print(f"[PRESET] Warning: {param_name} value '{value}' not recognized, using default")
+                    value = PRESET_DEFAULTS[param_name]
+            elif value not in rule["choices"]:
+                print(f"[PRESET] Warning: {param_name} value '{value}' not in valid choices {rule['choices']}, using default")
+                value = PRESET_DEFAULTS[param_name]
 
     return value
 
@@ -1245,27 +1356,26 @@ def load_preset(preset_name):
         except Exception as e:
             print(f"[PRESET] Warning: Could not save last used preset: {e}")
 
-        # Get aspect ratio choices based on DEFAULT base resolution (720x720) to ensure compatibility during initialization
-        # The aspect ratio will be properly updated when base_resolution_width/height change handlers run
-        default_ratios = get_common_aspect_ratios(720, 720)
-        stored_ratio = preset_data["aspect_ratio"]
+        stored_ratio_value = preset_data.get("aspect_ratio")
+        resolved_aspect_value = _resolve_aspect_ratio_value(
+            stored_ratio_value,
+            preset_data.get("video_width"),
+            preset_data.get("video_height"),
+        )
 
-        # Extract the ratio name (e.g., "16:9" from "16:9 - 960x544px")
-        ratio_name = stored_ratio.split(" - ")[0] if " - " in stored_ratio else stored_ratio
+        base_res_width = _coerce_positive_int(preset_data.get("base_resolution_width")) or 720
+        base_res_height = _coerce_positive_int(preset_data.get("base_resolution_height")) or 720
 
-        # Generate display_ratio based on default ratios to ensure it's always valid during initialization
-        if ratio_name in default_ratios:
-            display_ratio = f"{ratio_name} - {default_ratios[ratio_name][0]}x{default_ratios[ratio_name][1]}px"
-        else:
-            # Fallback to 16:9 if the stored ratio is not available
-            display_ratio = f"16:9 - {default_ratios['16:9'][0]}x{default_ratios['16:9'][1]}px"
-            print(f"[PRESET] Warning: Stored aspect ratio '{ratio_name}' not found in default ratios, using 16:9")
+        current_ratio_map = get_common_aspect_ratios(base_res_width, base_res_height)
+        aspect_ratio_choices = [_format_ratio_choice(name, dims) for name, dims in current_ratio_map.items()]
+        if resolved_aspect_value not in aspect_ratio_choices:
+            aspect_ratio_choices = [resolved_aspect_value] + aspect_ratio_choices
 
         # Return all UI updates in the correct order
         # This order must match the Gradio UI component order exactly
         return (
             gr.update(value=preset_data["video_text_prompt"]),
-            gr.update(value=display_ratio),
+            gr.update(value=resolved_aspect_value, choices=aspect_ratio_choices),
             gr.update(value=preset_data["video_width"]),
             gr.update(value=preset_data["video_height"]),
             gr.update(value=preset_data["auto_crop_image"]),
