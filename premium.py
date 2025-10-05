@@ -286,11 +286,21 @@ def generate_video(
     vae_tile_size,
     vae_tile_overlap,
     force_exact_resolution,
+    auto_crop_image=True,  # Default to True for backward compatibility
 ):
     global ovi_engine
 
     # Reset cancellation flag at the start of each generation request
     reset_cancellation()
+
+    # Debug: Log current generation parameters
+    print("=" * 80)
+    print("VIDEO GENERATION STARTED")
+    print(f"  Text prompt: {text_prompt[:50]}{'...' if len(text_prompt) > 50 else ''}")
+    print(f"  Image path: {image}")
+    print(f"  Resolution: {video_frame_height}x{video_frame_width}")
+    print(f"  Seed: {video_seed}")
+    print("=" * 80)
 
     try:
         # No need to check cancellation at the start since we just reset it
@@ -330,7 +340,60 @@ def generate_video(
 
         image_path = None
         if image is not None:
-            image_path = image
+            # Handle image processing here to ensure we use the current image
+            print(f"[DEBUG] Raw image path from upload: {image}")
+
+            # Use the auto_crop_image parameter from the UI
+            auto_crop_enabled = auto_crop_image
+
+            if auto_crop_enabled:
+                try:
+                    print("[DEBUG] Auto-cropping image for generation...")
+                    img = Image.open(image)
+                    iw, ih = img.size
+                    if ih > 0 and iw > 0:
+                        aspect = iw / ih
+                        closest_key = min(ASPECT_RATIOS.keys(), key=lambda k: abs(ASPECT_RATIOS[k][0] / ASPECT_RATIOS[k][1] - aspect))
+                        target_w, target_h = ASPECT_RATIOS[closest_key]
+                        print(f"[DEBUG] Detected aspect ratio: {closest_key} -> {target_w}x{target_h}")
+
+                        target_aspect = target_w / target_h
+                        image_aspect = iw / ih
+
+                        # Center crop to target aspect
+                        if image_aspect > target_aspect:
+                            crop_w = int(ih * target_aspect)
+                            left = (iw - crop_w) // 2
+                            box = (left, 0, left + crop_w, ih)
+                        else:
+                            crop_h = int(iw / target_aspect)
+                            top = (ih - crop_h) // 2
+                            box = (0, top, iw, top + crop_h)
+
+                        cropped = img.crop(box).resize((target_w, target_h), Image.Resampling.LANCZOS)
+
+                        # Save to temp dir
+                        tmp_dir = os.path.join(os.path.dirname(__file__), "temp")
+                        os.makedirs(tmp_dir, exist_ok=True)
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                        cropped_path = os.path.join(tmp_dir, f"cropped_{timestamp}.png")
+                        cropped.save(cropped_path)
+                        image_path = cropped_path
+                        print(f"[DEBUG] Cropped image saved to: {cropped_path}")
+                    else:
+                        image_path = image
+                        print("[DEBUG] Invalid image dimensions, using original")
+                except Exception as e:
+                    print(f"[DEBUG] Auto-crop failed: {e}, using original image")
+                    image_path = image
+            else:
+                image_path = image
+                print(f"[DEBUG] Using original image path (no cropping): {image_path}")
+
+            if os.path.exists(image_path):
+                print(f"[DEBUG] Final image file exists: Yes ({os.path.getsize(image_path)} bytes)")
+            else:
+                print(f"[DEBUG] Final image file exists: No - this may cause issues!")
 
         # Determine output directory
         if args.output_dir:
@@ -392,6 +455,7 @@ def generate_video(
                         'vae_tile_size': vae_tile_size,
                         'vae_tile_overlap': vae_tile_overlap,
                         'force_exact_resolution': force_exact_resolution,
+                        'auto_crop_image': auto_crop_image,
                     }
 
                 run_generation_subprocess(single_gen_params)
@@ -482,6 +546,16 @@ def generate_video(
                 save_generation_metadata(output_path, generation_params, current_seed)
 
             print(f"[GENERATION {gen_idx + 1}/{int(num_generations)}] Completed: {output_filename}")
+
+        # Debug: Log final output path
+        print("=" * 80)
+        print("VIDEO GENERATION COMPLETED")
+        print(f"  Final output path: {last_output_path}")
+        if last_output_path and os.path.exists(last_output_path):
+            print(f"  File exists: Yes ({os.path.getsize(last_output_path)} bytes)")
+        else:
+            print("  File exists: No")
+        print("=" * 80)
 
         return last_output_path
     except Exception as e:
@@ -679,8 +753,8 @@ PRESET_DEFAULTS = {
 
 # Parameter validation rules
 PRESET_VALIDATION = {
-    "video_width": {"type": int, "min": 128, "max": 1280},
-    "video_height": {"type": int, "min": 128, "max": 1280},
+    "video_width": {"type": int, "min": 128, "max": 1920},
+    "video_height": {"type": int, "min": 128, "max": 1920},
     "video_seed": {"type": int, "min": 0, "max": 100000},
     "sample_steps": {"type": int, "min": 1, "max": 100},
     "num_generations": {"type": int, "min": 1, "max": 100},
@@ -1419,6 +1493,7 @@ def process_batch_generation(
                         'vae_tile_size': vae_tile_size,
                         'vae_tile_overlap': vae_tile_overlap,
                         'force_exact_resolution': force_exact_resolution,
+                        'auto_crop_image': auto_crop_image,
                     }
 
                     success = run_generation_subprocess(single_gen_params)
@@ -1564,7 +1639,9 @@ def load_i2v_example_with_resolution(prompt, img_path):
         return (prompt, img_path, gr.update(), gr.update(), gr.update(), img_path)
 
 def on_image_upload(image_path, auto_crop_image, video_width, video_height, force_exact_resolution):
+    print(f"[DEBUG] on_image_upload called with image_path: {image_path}")
     if image_path is None:
+        print("[DEBUG] No image provided, clearing state")
         return (
             gr.update(visible=False, value=None),
             gr.update(value=None),
@@ -1624,6 +1701,7 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height, forc
             else:
                 aspect_ratio_value = gr.update(value=closest_key)
 
+            print(f"[DEBUG] on_image_upload returning cropped path: {cropped_path}")
             return (
                 gr.update(visible=True, value=cropped_path),
                 aspect_ratio_value,
@@ -1632,6 +1710,7 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height, forc
                 cropped_path
             )
         else:
+            print(f"[DEBUG] on_image_upload returning original path (no cropping): {image_path}")
             return (
                 gr.update(visible=False, value=None),
                 gr.update(),
@@ -1653,7 +1732,7 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height, forc
 theme = gr.themes.Soft()
 theme.font = [gr.themes.GoogleFont("Inter"), "Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v3.3 : https://www.patreon.com/posts/140393220")
+    gr.Markdown("# Ovi Pro SECourses Premium App v3.4 : https://www.patreon.com/posts/140393220")
 
     image_to_use = gr.State(value=None)
 
@@ -1683,8 +1762,8 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                                 label="Aspect Ratio",
                                 info="Select aspect ratio - width and height will update automatically"
                             )
-                            video_width = gr.Number(minimum=128, maximum=1280, value=992, step=32, label="Video Width")
-                            video_height = gr.Number(minimum=128, maximum=1280, value=512, step=32, label="Video Height")
+                            video_width = gr.Number(minimum=128, maximum=1920, value=992, step=32, label="Video Width")
+                            video_height = gr.Number(minimum=128, maximum=1920, value=512, step=32, label="Video Height")
                             auto_crop_image = gr.Checkbox(
                                 value=True,
                                 label="Auto Crop Image",
@@ -2246,17 +2325,25 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
         outputs=[video_seed],
     )
 
-    # Hook up video generation
+    # Hook up video generation with video clearing first
+    def clear_video_output():
+        """Clear the video output component before generation."""
+        return None
+
     run_btn.click(
+        fn=clear_video_output,
+        inputs=[],
+        outputs=[output_path],
+    ).then(
         fn=generate_video,
         inputs=[
-            video_text_prompt, image_to_use, video_height, video_width, video_seed, solver_name,
+            video_text_prompt, image, video_height, video_width, video_seed, solver_name,
             sample_steps, shift, video_guidance_scale, audio_guidance_scale,
             slg_layer, blocks_to_swap, video_negative_prompt, audio_negative_prompt,
             gr.Checkbox(value=False, visible=False), cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
             no_audio, gr.Checkbox(value=False, visible=False),
             num_generations, randomize_seed, save_metadata, aspect_ratio, clear_all,
-            vae_tiled_decode, vae_tile_size, vae_tile_overlap, force_exact_resolution,
+            vae_tiled_decode, vae_tile_size, vae_tile_overlap, force_exact_resolution, auto_crop_image,
         ],
         outputs=[output_path],
     )
@@ -2562,6 +2649,12 @@ if __name__ == "__main__":
             'randomize_seed': False,
             'save_metadata': True,
             'aspect_ratio': "16:9 Landscape",
+            'clear_all': True,
+            'vae_tiled_decode': False,
+            'vae_tile_size': 32,
+            'vae_tile_overlap': 8,
+            'force_exact_resolution': False,
+            'auto_crop_image': True,
         }
 
         # Override with test args only (not replace all values)
