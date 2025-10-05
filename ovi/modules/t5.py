@@ -586,8 +586,19 @@ class T5EncoderModel:
         logging.info(f'loading {checkpoint_path}')
         weights_start = time.perf_counter()
         
-        # Load weights directly to target device
-        state_dict = torch.load(checkpoint_path, map_location=map_location)
+        # Load weights with memory mapping for reduced RAM usage
+        # NOTE: torch.load() with .pth files MUST read to CPU RAM first (PyTorch limitation)
+        # map_location only controls where tensors END UP after deserialization
+        # mmap=True streams from disk to reduce peak RAM usage
+        try:
+            # PyTorch 2.0+ supports mmap for reduced RAM pressure
+            state_dict = torch.load(checkpoint_path, map_location=map_location, mmap=True)
+            print(f"[T5 LOAD][BF16] Using memory-mapped loading (reduced RAM pressure)")
+        except TypeError:
+            # Fallback for PyTorch < 2.0 (no mmap support)
+            state_dict = torch.load(checkpoint_path, map_location=map_location)
+            print(f"[T5 LOAD][BF16] Memory mapping not available (PyTorch < 2.0)")
+        
         model.load_state_dict(state_dict, assign=True)  # assign=True for meta device
         del state_dict
         
