@@ -555,18 +555,29 @@ class T5EncoderModel:
         load_start = time.perf_counter()
         is_cpu_only = (device == 'cpu' or (isinstance(device, str) and device == 'cpu'))
         
-        # OPTIMIZED: Create model structure directly on target device (GPU or CPU)
-        # This is FASTER than meta device because:
-        # 1. GPU structure creation is fast (~1-2s)
-        # 2. No meta→GPU materialization overhead
-        # 3. Simpler code path
+        # OPTIMIZED: Create model structure directly on target device
+        # For CPU: use skip_init=True to avoid 13s weight initialization overhead
+        # For GPU: keep it simple (skip_init can cause issues with parallel builds)
         logging.info(f'Creating T5 model structure on {device}...')
         structure_start = time.perf_counter()
-        model = umt5_xxl(
-            encoder_only=True,
-            return_tokenizer=False,
-            dtype=dtype,
-            device=device).eval().requires_grad_(False)
+        
+        if is_cpu_only:
+            # CPU path: skip init to save 13s, no parallel build to save RAM
+            model = umt5_xxl(
+                encoder_only=True,
+                return_tokenizer=False,
+                dtype=dtype,
+                device=device,
+                skip_init=True,
+                build_parallel=False).eval().requires_grad_(False)
+        else:
+            # GPU path: simple and fast (like original code)
+            model = umt5_xxl(
+                encoder_only=True,
+                return_tokenizer=False,
+                dtype=dtype,
+                device=device).eval().requires_grad_(False)
+        
         structure_time = time.perf_counter() - structure_start
         print(f"[T5 LOAD][BF16] Model structure created on {device} in {structure_time:.2f}s")
         
@@ -599,6 +610,43 @@ class T5EncoderModel:
         load_start = time.perf_counter()
         cache_path = self._get_fp8_cache_path(checkpoint_path)
 
+        # OPTIMIZATION: If FP8 cache exists, create structure on CPU to avoid BF16 VRAM allocation
+        # Then load FP8 weights (which are already FP8 in cache) and move to GPU
+        # This ensures we NEVER allocate BF16 weights on GPU (saves ~5GB VRAM)
+        if cache_path and os.path.exists(cache_path):
+            print(f"[FP8 CACHE] Found cached FP8 checkpoint: {cache_path}")
+            print(f"[FP8 CACHE] Creating structure on CPU first (avoids BF16 VRAM allocation)")
+            
+            structure_start = time.perf_counter()
+            # CRITICAL: Create on CPU to avoid allocating BF16 weights on GPU
+            # FP8 weights will be loaded from cache, then moved to GPU (saves ~5GB)
+            model = umt5_xxl(
+                encoder_only=True,
+                return_tokenizer=False,
+                dtype=dtype,
+                device='cpu',  # CPU first! Avoid BF16 GPU allocation
+                skip_init=True,
+                build_parallel=True).eval().requires_grad_(False)
+            structure_time = time.perf_counter() - structure_start
+            print(f"[T5 LOAD][FP8] Structure created on CPU in {structure_time:.2f}s (FP8 cached path)")
+            
+            try:
+                cache_load_start = time.perf_counter()
+                model = self._load_from_cached_fp8(model, cache_path, device, dtype, apply_fp8_monkey_patch)
+                if model is not None:
+                    print("[FP8 CACHE] Loaded cached FP8 T5 encoder successfully")
+                    cache_total = time.perf_counter() - cache_load_start
+                    total_time = time.perf_counter() - load_start
+                    print(f"[T5 LOAD][FP8] Total time: {total_time:.2f}s (structure: {structure_time:.2f}s, cache load: {cache_total:.2f}s)")
+                    return model
+            except Exception as load_err:
+                logging.warning(f"Failed to load cached FP8 checkpoint ({load_err}). Rebuilding FP8 weights...")
+                print(f"[FP8 CACHE] Failed to load cached FP8 checkpoint ({load_err}). Regenerating...")
+                # Fall through to regeneration path below
+
+        # First run OR cache load failed: Need to quantize from scratch
+        # Create structure on CPU for quantization (safer for memory)
+        print(f"[FP8 CACHE] No valid cache found - will quantize from scratch")
         logging.info(f'Loading T5 model from {checkpoint_path} in bf16 on CPU...')
         structure_start = time.perf_counter()
         model = umt5_xxl(
@@ -609,28 +657,9 @@ class T5EncoderModel:
             skip_init=True,
             build_parallel=True).eval().requires_grad_(False)
         structure_time = time.perf_counter() - structure_start
-        print(f"[T5 LOAD][FP8] Encoder structure created in {structure_time:.2f}s")
+        print(f"[T5 LOAD][FP8] Structure created on CPU in {structure_time:.2f}s (quantization path)")
 
-        if cache_path and os.path.exists(cache_path):
-            print(f"[FP8 CACHE] Found cached FP8 checkpoint: {cache_path}")
-            try:
-                cache_load_start = time.perf_counter()
-                model = self._load_from_cached_fp8(model, cache_path, device, dtype, apply_fp8_monkey_patch)
-                if model is not None:
-                    print("[FP8 CACHE] Loaded cached FP8 T5 encoder successfully")
-                    cache_total = time.perf_counter() - cache_load_start
-                    total_time = time.perf_counter() - load_start
-                    print(f"[T5 LOAD][FP8] Cached weights applied in {cache_total:.2f}s (total {total_time:.2f}s)")
-                    return model
-            except Exception as load_err:
-                logging.warning(f"Failed to load cached FP8 checkpoint ({load_err}). Rebuilding FP8 weights...")
-                print(f"[FP8 CACHE] Failed to load cached FP8 checkpoint ({load_err}). Regenerating...")
-        else:
-            if cache_path:
-                print(f"[FP8 CACHE] Cached FP8 checkpoint not found at {cache_path}")
-            else:
-                print("[FP8 CACHE] Cache path could not be determined; proceeding with FP8 conversion")
-
+        # Load BF16 weights from disk
         weights_start = time.perf_counter()
         model.load_state_dict(torch.load(checkpoint_path, map_location='cpu'))
         logging.info("Model loaded in bf16 on CPU")
