@@ -764,6 +764,54 @@ def update_resolution(aspect_ratio, base_resolution_width=720, base_resolution_h
         print(f"Error updating resolution: {e}")
         return [gr.update(), gr.update()]
 
+def update_aspect_ratio_and_resolution(base_resolution_width, base_resolution_height, current_aspect_ratio):
+    """Combined update for aspect ratio choices and resolution to avoid race conditions."""
+    try:
+        base_width = _coerce_positive_int(base_resolution_width)
+        base_height = _coerce_positive_int(base_resolution_height)
+
+        if base_width is None or base_height is None:
+            # Keep existing state while user is typing invalid values
+            return gr.update(), gr.update(), gr.update()
+
+        current_ratios = get_common_aspect_ratios(base_width, base_height)
+        choices = [_format_ratio_choice(name, dims) for name, dims in current_ratios.items()]
+
+        # Handle custom aspect ratios
+        custom_dims = _parse_custom_choice(current_aspect_ratio)
+        if custom_dims:
+            selected_value = _format_custom_choice(custom_dims[0], custom_dims[1])
+            if selected_value not in choices:
+                choices = [selected_value] + choices
+            return gr.update(choices=choices, value=selected_value), custom_dims[0], custom_dims[1]
+
+        # Extract ratio name from current selection
+        ratio_name = _extract_ratio_name(current_aspect_ratio)
+        if ratio_name not in current_ratios:
+            ratio_name = "16:9" if "16:9" in current_ratios else next(iter(current_ratios))
+
+        # Get dimensions for this ratio from new base resolution
+        width, height = current_ratios[ratio_name]
+        selected_value = _format_ratio_choice(ratio_name, (width, height))
+
+        # Ensure selected_value is in choices
+        if selected_value not in choices:
+            choices = [selected_value] + choices
+
+        return gr.update(choices=choices, value=selected_value), width, height
+
+    except Exception as e:
+        print(f"Error updating aspect ratio and resolution: {e}")
+        # Return safe defaults
+        try:
+            default_ratios = get_common_aspect_ratios(720, 720)
+            default_choices = [_format_ratio_choice(name, dims) for name, dims in default_ratios.items()]
+            default_value = default_choices[0] if default_choices else None
+            default_width, default_height = default_ratios["16:9"]
+            return gr.update(choices=default_choices, value=default_value), default_width, default_height
+        except:
+            return gr.update(), gr.update(), gr.update()
+
 def update_aspect_ratio_choices(base_resolution_width, base_resolution_height, current_aspect_ratio=None):
     """Update aspect ratio dropdown choices based on base resolution with graceful handling during user input."""
     try:
@@ -777,6 +825,7 @@ def update_aspect_ratio_choices(base_resolution_width, base_resolution_height, c
         current_ratios = get_common_aspect_ratios(base_width, base_height)
         choices = [_format_ratio_choice(name, dims) for name, dims in current_ratios.items()]
 
+        # Handle custom aspect ratios
         custom_dims = _parse_custom_choice(current_aspect_ratio)
         if custom_dims:
             selected_value = _format_custom_choice(custom_dims[0], custom_dims[1])
@@ -784,23 +833,33 @@ def update_aspect_ratio_choices(base_resolution_width, base_resolution_height, c
                 choices = [selected_value] + choices
             return gr.update(choices=choices, value=selected_value)
 
+        # Extract ratio name from current selection (e.g., "16:9" from "16:9 - 352x192px")
         ratio_name = _extract_ratio_name(current_aspect_ratio)
         if ratio_name not in current_ratios:
             ratio_name = "16:9" if "16:9" in current_ratios else next(iter(current_ratios))
 
+        # Create new value with the same ratio name but NEW dimensions from new base resolution
         selected_value = _format_ratio_choice(ratio_name, current_ratios[ratio_name])
 
-        if (
-            current_aspect_ratio
-            and current_aspect_ratio not in choices
-            and not str(current_aspect_ratio).startswith(CUSTOM_ASPECT_PREFIX)
-        ):
-            choices = [current_aspect_ratio] + choices
+        # CRITICAL FIX: Ensure selected_value is ALWAYS in choices before returning
+        # This prevents Gradio errors when base resolution changes
+        if selected_value not in choices:
+            # This should never happen since we just created it from current_ratios,
+            # but add it as a safety measure
+            choices = [selected_value] + choices
 
         return gr.update(choices=choices, value=selected_value)
     except Exception as e:
         print(f"Error updating aspect ratio choices: {e}")
-        return gr.update()
+        # In case of any error, return a safe default
+        try:
+            default_ratios = get_common_aspect_ratios(720, 720)
+            default_choices = [_format_ratio_choice(name, dims) for name, dims in default_ratios.items()]
+            default_value = default_choices[0] if default_choices else None
+            return gr.update(choices=default_choices, value=default_value)
+        except:
+            # Ultimate fallback - return empty update
+            return gr.update()
 
 def _resolve_aspect_ratio_value(aspect_ratio_label, video_width, video_height):
     if isinstance(aspect_ratio_label, str) and aspect_ratio_label.startswith(CUSTOM_ASPECT_PREFIX):
@@ -1530,7 +1589,10 @@ def initialize_app_with_auto_load():
         # The order must match the outputs list in demo.load()
         # Initialize aspect ratio choices with resolution info
         default_ratios = get_common_aspect_ratios(720, 720)
-        initial_aspect_choices = gr.update(choices=[f"{name} - {w}x{h}px" for name, (w, h) in default_ratios.items()])
+        aspect_choices = [f"{name} - {w}x{h}px" for name, (w, h) in default_ratios.items()]
+        # Set default to 16:9 if available, otherwise first choice
+        default_aspect_value = next((c for c in aspect_choices if c.startswith("16:9")), aspect_choices[0] if aspect_choices else None)
+        initial_aspect_choices = gr.update(choices=aspect_choices, value=default_aspect_value)
 
         return (
             dropdown_update,  # preset_dropdown
@@ -2122,7 +2184,7 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height):
 theme = gr.themes.Soft()
 theme.font = [gr.themes.GoogleFont("Inter"), "Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v3.5 : https://www.patreon.com/posts/140393220")
+    gr.Markdown("# Ovi Pro SECourses Premium App v3.6 : https://www.patreon.com/posts/140393220")
 
     image_to_use = gr.State(value=None)
 
@@ -2151,7 +2213,8 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                                     choices=[f"{name} - {w}x{h}px" for name, (w, h) in get_common_aspect_ratios(720, 720).items()],
                                     value="16:9 - 992x512px",
                                     label="Aspect Ratio",
-                                    info="Select aspect ratio - width and height will update automatically based on base resolution"
+                                    info="Select aspect ratio - width and height will update automatically based on base resolution",
+                                    allow_custom_value=True
                                 )
                             with gr.Column(scale=2, min_width=1):
                                 with gr.Row():
@@ -2728,24 +2791,17 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
 
     # Hook up aspect ratio change
     # Update aspect ratio choices when base resolution changes
+    # Use combined function to avoid race conditions
     base_resolution_width.change(
-        fn=update_aspect_ratio_choices,
+        fn=update_aspect_ratio_and_resolution,
         inputs=[base_resolution_width, base_resolution_height, aspect_ratio],
-        outputs=[aspect_ratio],
-    ).then(
-        fn=update_resolution,
-        inputs=[aspect_ratio, base_resolution_width, base_resolution_height],
-        outputs=[video_width, video_height],
+        outputs=[aspect_ratio, video_width, video_height],
     )
 
     base_resolution_height.change(
-        fn=update_aspect_ratio_choices,
+        fn=update_aspect_ratio_and_resolution,
         inputs=[base_resolution_width, base_resolution_height, aspect_ratio],
-        outputs=[aspect_ratio],
-    ).then(
-        fn=update_resolution,
-        inputs=[aspect_ratio, base_resolution_width, base_resolution_height],
-        outputs=[video_width, video_height],
+        outputs=[aspect_ratio, video_width, video_height],
     )
 
 
