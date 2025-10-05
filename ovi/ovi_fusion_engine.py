@@ -88,8 +88,14 @@ class OviFusionEngine:
         # Check if T5 needs to be reloaded (was deleted in previous generation)
         if self.text_model is None:
             device_idx = self.device if isinstance(self.device, int) else (self.device.index if self.device.index is not None else 0)
-            
-            if self.cpu_only_t5:
+
+            if self.cpu_only_t5 and self.fp8_t5:
+                print("=" * 80)
+                print("T5 CPU-ONLY + SCALED FP8: Loading FP8 T5 on CPU for maximum memory efficiency")
+                print("Expected RAM savings: ~50% (~2.5GB saved) compared to full precision on CPU")
+                print("Text encoding will be slower but uses minimal RAM")
+                print("=" * 80)
+            elif self.cpu_only_t5:
                 print("=" * 80)
                 print("T5 CPU-ONLY MODE: Loading T5 on CPU for CPU inference")
                 print("This saves VRAM but text encoding will be slower")
@@ -137,9 +143,17 @@ class OviFusionEngine:
 
         # Handle T5 cleanup based on settings
         if delete_text_encoder:
-            print("Deleting T5 text encoder to free VRAM/RAM...")
-            if torch.cuda.is_available():
-                before_delete_vram = torch.cuda.memory_allocated(self.device) / 1e9
+            if self.cpu_only_t5:
+                print("Deleting T5 text encoder to free RAM...")
+                # Measure RAM before deletion
+                import psutil
+                import os
+                process = psutil.Process(os.getpid())
+                before_delete_ram = process.memory_info().rss / 1e9
+            else:
+                print("Deleting T5 text encoder to free VRAM...")
+                if torch.cuda.is_available():
+                    before_delete_vram = torch.cuda.memory_allocated(self.device) / 1e9
 
             # Ensure T5 is properly deleted from both RAM and VRAM
             if hasattr(self, 'text_model') and self.text_model is not None:
@@ -160,7 +174,14 @@ class OviFusionEngine:
                     torch.cuda.empty_cache()
                     torch.cuda.synchronize(self.device)
 
-            if torch.cuda.is_available():
+            # Report memory freed based on where T5 was loaded
+            if self.cpu_only_t5:
+                # Measure RAM after deletion
+                after_delete_ram = process.memory_info().rss / 1e9
+                freed_ram = before_delete_ram - after_delete_ram
+                print(f"T5 deleted. RAM freed: {freed_ram:.2f} GB")
+                print(f"Current RAM usage: {after_delete_ram:.2f} GB")
+            elif torch.cuda.is_available():
                 after_delete_vram = torch.cuda.memory_allocated(self.device) / 1e9
                 freed_vram = before_delete_vram - after_delete_vram
                 print(f"T5 deleted. VRAM freed: {freed_vram:.2f} GB")
@@ -224,9 +245,15 @@ class OviFusionEngine:
         # ===================================================================
         if load_text_encoder and self.text_model is None:
             device_idx = self.device if isinstance(self.device, int) else (self.device.index if self.device.index is not None else 0)
-            
+
             # Load T5 with FP8/CPU-only options from instance variables
-            if self.cpu_only_t5:
+            if self.cpu_only_t5 and self.fp8_t5:
+                print("=" * 80)
+                print("T5 CPU-ONLY + SCALED FP8: Loading FP8 T5 on CPU for maximum memory efficiency")
+                print("Expected RAM savings: ~50% (~2.5GB saved) compared to full precision on CPU")
+                print("Text encoding will be slower but uses minimal RAM")
+                print("=" * 80)
+            elif self.cpu_only_t5:
                 print("=" * 80)
                 print("T5 CPU-ONLY MODE: Loading T5 on CPU for CPU inference")
                 print("This saves VRAM but text encoding will be slower")
