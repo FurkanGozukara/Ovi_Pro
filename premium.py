@@ -289,6 +289,8 @@ def generate_video(
     base_resolution_height,
     duration_seconds,
     auto_crop_image=True,  # Default to True for backward compatibility
+    base_filename=None,  # For batch processing to use custom filenames
+    output_dir=None,  # Custom output directory (overrides args.output_dir)
 ):
     global ovi_engine
 
@@ -367,9 +369,11 @@ def generate_video(
             else:
                 print(f"[DEBUG] Final image file exists: No - this may cause issues!")
 
-        # Determine output directory
-        if args.output_dir:
-            outputs_dir = args.output_dir
+        # Determine output directory (priority: parameter > CLI arg > default)
+        if output_dir:
+            outputs_dir = os.path.abspath(output_dir)  # Normalize path
+        elif args.output_dir:
+            outputs_dir = os.path.abspath(args.output_dir)
         else:
             outputs_dir = os.path.join(os.path.dirname(__file__), "outputs")
         os.makedirs(outputs_dir, exist_ok=True)
@@ -430,21 +434,26 @@ def generate_video(
                         'base_resolution_height': base_resolution_height,
                         'duration_seconds': duration_seconds,
                         'auto_crop_image': auto_crop_image,
+                        'base_filename': base_filename,  # Pass base filename for batch processing
+                        'output_dir': outputs_dir,  # Pass output directory to subprocess
                     }
 
                 run_generation_subprocess(single_gen_params)
 
-                # Find the generated file (should be the most recent in outputs)
-                outputs_dir = args.output_dir if args.output_dir else os.path.join(os.path.dirname(__file__), "outputs")
+                # Find the generated file (should be the most recent in the outputs directory)
                 import glob
-                pattern = os.path.join(outputs_dir, "ovi_generation_*.mp4")
+                # Construct pattern based on base_filename if provided, otherwise use default
+                if base_filename:
+                    pattern = os.path.join(outputs_dir, f"{base_filename}_*.mp4")
+                else:
+                    pattern = os.path.join(outputs_dir, "ovi_generation_*.mp4")
                 existing_files = glob.glob(pattern)
                 if existing_files:
                     last_output_path = max(existing_files, key=os.path.getctime)
                     print(f"[GENERATION {gen_idx + 1}/{int(num_generations)}] Completed: {os.path.basename(last_output_path)}")
                     continue
                 else:
-                    print(f"[GENERATION {gen_idx + 1}/{int(num_generations)}] No output file found")
+                    print(f"[GENERATION {gen_idx + 1}/{int(num_generations)}] No output file found in {outputs_dir}")
                     continue
 
             # Original generation logic (when clear_all is disabled)
@@ -474,7 +483,7 @@ def generate_video(
             )
 
             # Get next available filename in sequential format
-            output_filename = get_next_filename(outputs_dir)
+            output_filename = get_next_filename(outputs_dir, base_filename=base_filename)
             output_path = os.path.join(outputs_dir, output_filename)
 
             # Handle no_audio option
@@ -520,7 +529,7 @@ def generate_video(
                 }
                 save_generation_metadata(output_path, generation_params, current_seed)
 
-            print(f"[GENERATION {gen_idx + 1}/{int(num_generations)}] Completed: {output_filename}")
+            print(f"[GENERATION {gen_idx + 1}/{int(num_generations)}] Saved to: {output_path}")
 
         # Calculate and log total generation time
         generation_end_time = time.time()
@@ -1664,6 +1673,9 @@ def scan_batch_files(input_folder):
     import os
     import glob
 
+    # Normalize path to handle spaces and cross-platform compatibility
+    input_folder = os.path.abspath(input_folder.strip())
+    
     if not os.path.exists(input_folder):
         raise Exception(f"Input folder does not exist: {input_folder}")
 
@@ -1733,19 +1745,28 @@ def process_batch_generation(
         # Check for cancellation at the start
         check_cancellation()
 
-        # Determine output directory
+        # Determine output directory (normalize paths for both Windows and Linux)
         if output_folder and output_folder.strip():
-            outputs_dir = output_folder.strip()
+            outputs_dir = os.path.abspath(output_folder.strip())  # Normalize path and handle spaces
         elif args.output_dir:
-            outputs_dir = args.output_dir
+            outputs_dir = os.path.abspath(args.output_dir)
         else:
             outputs_dir = os.path.join(os.path.dirname(__file__), "outputs")
-        os.makedirs(outputs_dir, exist_ok=True)
+        
+        # Create output directory if it doesn't exist
+        try:
+            os.makedirs(outputs_dir, exist_ok=True)
+            print(f"[BATCH] Output directory: {outputs_dir}")
+        except Exception as e:
+            raise Exception(f"Failed to create output directory '{outputs_dir}': {e}")
 
-        # Scan batch files
-        batch_items = scan_batch_files(input_folder)
+        # Scan batch files (normalize input folder path)
+        input_folder_normalized = os.path.abspath(input_folder.strip())
+        print(f"[BATCH] Input directory: {input_folder_normalized}")
+        
+        batch_items = scan_batch_files(input_folder_normalized)
         if not batch_items:
-            raise Exception(f"No .txt files found in input folder: {input_folder}")
+            raise Exception(f"No .txt files found in input folder: {input_folder_normalized}")
 
         print(f"\n[INFO] Found {len(batch_items)} items to process:")
         for base_name, img_path, txt_path in batch_items:
@@ -1876,20 +1897,23 @@ def process_batch_generation(
                         'base_resolution_height': base_resolution_height,
                         'duration_seconds': duration_seconds,
                         'auto_crop_image': auto_crop_image,
+                        'base_filename': base_name,  # Use base name for batch processing
+                        'output_dir': outputs_dir,  # Pass output directory to subprocess
                     }
 
                     success = run_generation_subprocess(single_gen_params)
                     if success:
-                        # Find the generated file with base_name prefix
+                        # Find the generated file with base_name prefix in the correct output directory
                         import glob
                         pattern = os.path.join(outputs_dir, f"{base_name}_*.mp4")
                         existing_files = glob.glob(pattern)
                         if existing_files:
                             last_output_path = max(existing_files, key=os.path.getctime)
-                            print(f"    [SUCCESS] Saved: {os.path.basename(last_output_path)}")
+                            print(f"    [SUCCESS] Saved to: {last_output_path}")
                             processed_count += 1
                         else:
-                            print(f"    [WARNING] No output file found for {base_name}")
+                            print(f"    [WARNING] No output file found for {base_name} in {outputs_dir}")
+                            print(f"    [DEBUG] Search pattern: {pattern}")
                     else:
                         print(f"    [ERROR] Generation failed in subprocess")
                     continue
@@ -1968,17 +1992,20 @@ def process_batch_generation(
                         }
                         save_generation_metadata(output_path, generation_params, current_seed)
 
-                    print(f"    [SUCCESS] Saved: {output_filename}")
+                    print(f"    [SUCCESS] Saved to: {output_path}")
                     processed_count += 1
 
                 except Exception as e:
                     print(f"    [ERROR] Generation failed: {e}")
                     continue
 
-        print("\n[BATCH COMPLETE]")
+        print("\n" + "=" * 80)
+        print("[BATCH COMPLETE]")
         print(f"  Processed: {processed_count} videos")
         print(f"  Skipped: {skipped_count} existing videos")
         print(f"  Total items: {len(batch_items)}")
+        print(f"  Output directory: {outputs_dir}")
+        print("=" * 80)
 
         return last_output_path
 
