@@ -2074,58 +2074,52 @@ def load_i2v_example_with_resolution(prompt, img_path):
         print(f"Error loading I2V example: {e}")
         return (prompt, img_path, gr.update(), gr.update(), gr.update(), img_path)
 
-def on_image_upload(image_path, auto_crop_image, video_width, video_height):
-    print(f"[DEBUG] on_image_upload called with image_path: {image_path}")
-    if image_path is None:
-        print("[DEBUG] No image provided, clearing state")
+def update_cropped_image_only(image_path, auto_crop_image, video_width, video_height):
+    """Update only the cropped image and labels when resolution changes (doesn't update aspect ratio dropdown or width/height fields)."""
+    if image_path is None or not os.path.exists(image_path):
         return (
             gr.update(visible=False, value=None),
-            gr.update(value=None),
-            gr.update(value=None),
-            gr.update(),
-            gr.update(),
+            gr.update(value="", visible=False),
+            gr.update(value="", visible=False),
             None
         )
-
+    
     try:
         img = Image.open(image_path)
         iw, ih = img.size
-        if ih == 0 or iw == 0:
-            raise ValueError("Invalid image dimensions")
+        
+        # Show input image resolution
+        input_res_label = f"**Input Image Resolution:** {iw}×{ih}px"
+        
+        if ih == 0 or iw == 0 or not auto_crop_image:
+            return (
+                gr.update(visible=False, value=None),
+                gr.update(value=input_res_label, visible=True),
+                gr.update(value="", visible=False),
+                image_path
+            )
 
-        closest_key = None
-
-        # Always use exact resolution (snapped to 32px for compatibility)
+        # Use exact resolution (snapped to 32px for compatibility)
         if video_width and video_height:
-            # Snap to nearest multiples of 32 for compatibility
             target_w = max(32, (int(video_width) // 32) * 32)
             target_h = max(32, (int(video_height) // 32) * 32)
-            print(f"[AUTO-CROP] Using exact resolution: {target_w}x{target_h} (snapped to 32px)")
-
-            if target_h > 0:
-                aspect = target_w / target_h
-                closest_key = min(
-                    ASPECT_RATIOS.keys(),
-                    key=lambda k: abs((ASPECT_RATIOS[k][0] / ASPECT_RATIOS[k][1]) - aspect)
-                )
         else:
-            # Fallback: find closest aspect ratio match
-            aspect = iw / ih
-            closest_key = min(ASPECT_RATIOS.keys(), key=lambda k: abs(ASPECT_RATIOS[k][0] / ASPECT_RATIOS[k][1] - aspect))
-            target_w, target_h = ASPECT_RATIOS[closest_key]
-            print(f"[AUTO-CROP] Using aspect ratio match: {closest_key} -> {target_w}x{target_h}")
+            return (
+                gr.update(visible=False, value=None),
+                gr.update(value=input_res_label, visible=True),
+                gr.update(value="", visible=False),
+                image_path
+            )
 
         target_aspect = target_w / target_h
         image_aspect = iw / ih
 
         # Center crop to target aspect
         if image_aspect > target_aspect:
-            # Image is wider, crop sides
             crop_w = int(ih * target_aspect)
             left = (iw - crop_w) // 2
             box = (left, 0, left + crop_w, ih)
         else:
-            # Image is taller, crop top/bottom
             crop_h = int(iw / target_aspect)
             top = (ih - crop_h) // 2
             box = (0, top, iw, top + crop_h)
@@ -2138,6 +2132,97 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         cropped_path = os.path.join(tmp_dir, f"cropped_{timestamp}.png")
         cropped.save(cropped_path)
+
+        # Create output resolution label
+        output_res_label = f"**Cropped Image Resolution:** {target_w}×{target_h}px"
+
+        return (
+            gr.update(visible=True, value=cropped_path),
+            gr.update(value=input_res_label, visible=True),
+            gr.update(value=output_res_label, visible=True),
+            cropped_path
+        )
+    except Exception as e:
+        print(f"Error in update_cropped_image_only: {e}")
+        return (
+            gr.update(visible=False, value=None),
+            gr.update(value="", visible=False),
+            gr.update(value="", visible=False),
+            image_path
+        )
+
+def update_image_crop_and_labels(image_path, auto_crop_image, video_width, video_height):
+    """Update cropped image and resolution labels when resolution changes."""
+    if image_path is None or not os.path.exists(image_path):
+        return (
+            gr.update(visible=False, value=None),
+            gr.update(value="", visible=False),
+            gr.update(),
+            gr.update(),
+            gr.update(value="", visible=False),
+            None
+        )
+    
+    try:
+        img = Image.open(image_path)
+        iw, ih = img.size
+        
+        # Show input image resolution
+        input_res_label = f"**Input Image Resolution:** {iw}×{ih}px"
+        
+        if ih == 0 or iw == 0:
+            return (
+                gr.update(visible=False, value=None),
+                gr.update(value=input_res_label, visible=True),
+                gr.update(),
+                gr.update(),
+                gr.update(value="", visible=False),
+                image_path
+            )
+
+        closest_key = None
+
+        # Use exact resolution (snapped to 32px for compatibility)
+        if video_width and video_height:
+            target_w = max(32, (int(video_width) // 32) * 32)
+            target_h = max(32, (int(video_height) // 32) * 32)
+
+            if target_h > 0:
+                aspect = target_w / target_h
+                closest_key = min(
+                    ASPECT_RATIOS.keys(),
+                    key=lambda k: abs((ASPECT_RATIOS[k][0] / ASPECT_RATIOS[k][1]) - aspect)
+                )
+        else:
+            # Fallback: find closest aspect ratio match
+            aspect = iw / ih
+            closest_key = min(ASPECT_RATIOS.keys(), key=lambda k: abs(ASPECT_RATIOS[k][0] / ASPECT_RATIOS[k][1] - aspect))
+            target_w, target_h = ASPECT_RATIOS[closest_key]
+
+        target_aspect = target_w / target_h
+        image_aspect = iw / ih
+
+        # Center crop to target aspect
+        if image_aspect > target_aspect:
+            crop_w = int(ih * target_aspect)
+            left = (iw - crop_w) // 2
+            box = (left, 0, left + crop_w, ih)
+        else:
+            crop_h = int(iw / target_aspect)
+            top = (ih - crop_h) // 2
+            box = (0, top, iw, top + crop_h)
+
+        cropped = img.crop(box).resize((target_w, target_h), Image.Resampling.LANCZOS)
+
+        # Save to temp dir
+        tmp_dir = os.path.join(os.path.dirname(__file__), "temp")
+        os.makedirs(tmp_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        cropped_path = os.path.join(tmp_dir, f"cropped_{timestamp}.png")
+        cropped.save(cropped_path)
+
+        # Create output resolution label
+        output_res_label = f"**Cropped Image Resolution:** {target_w}×{target_h}px"
 
         if auto_crop_image:
             display_value = None
@@ -2153,38 +2238,58 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height):
                     aspect_choices = [display_value] + aspect_choices
             aspect_ratio_value = gr.update(value=display_value, choices=aspect_choices)
 
-            print(f"[DEBUG] on_image_upload returning cropped path: {cropped_path}")
             return (
                 gr.update(visible=True, value=cropped_path),
+                gr.update(value=input_res_label, visible=True),
                 aspect_ratio_value,
                 gr.update(value=target_w),
                 gr.update(value=target_h),
+                gr.update(value=output_res_label, visible=True),
                 cropped_path
             )
         else:
-            print(f"[DEBUG] on_image_upload returning original path (no cropping): {image_path}")
             return (
                 gr.update(visible=False, value=None),
+                gr.update(value=input_res_label, visible=True),
                 gr.update(),
                 gr.update(),
                 gr.update(),
+                gr.update(value="", visible=False),
                 image_path
             )
     except Exception as e:
-        print(f"Auto-crop error: {e}")
+        print(f"Error in update_image_crop_and_labels: {e}")
         return (
             gr.update(visible=False, value=None),
+            gr.update(value="", visible=False),
             gr.update(),
             gr.update(),
             gr.update(),
-            gr.update(),
+            gr.update(value="", visible=False),
             image_path
         )
+
+def on_image_upload(image_path, auto_crop_image, video_width, video_height):
+    """Called when user uploads a new image."""
+    if image_path is None:
+        return (
+            gr.update(visible=False, value=None),
+            gr.update(value="", visible=False),
+            gr.update(value=None),
+            gr.update(value=None),
+            gr.update(),
+            gr.update(),
+            gr.update(value="", visible=False),
+            None
+        )
+
+    # Call the shared update function
+    return update_image_crop_and_labels(image_path, auto_crop_image, video_width, video_height)
 
 theme = gr.themes.Soft()
 theme.font = [gr.themes.GoogleFont("Inter"), "Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v3.6 : https://www.patreon.com/posts/140393220")
+    gr.Markdown("# Ovi Pro SECourses Premium App v3.7 : https://www.patreon.com/posts/140393220")
 
     image_to_use = gr.State(value=None)
 
@@ -2194,6 +2299,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                 with gr.Column():
                     # Image section
                     image = gr.Image(type="filepath", label="First Frame Image (upload or generate)", height=512)
+                    image_resolution_label = gr.Markdown("", visible=False)
 
                     # Generate Video button right under image upload
                     run_btn = gr.Button("Generate Video 🚀", variant="primary", size="lg")
@@ -2403,6 +2509,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                         open_outputs_btn = gr.Button("📁 Open Outputs Folder")
                         cancel_btn = gr.Button("❌ Cancel All", variant="stop")
                     cropped_display = gr.Image(label="Cropped First Frame", visible=False, height=512)
+                    cropped_resolution_label = gr.Markdown("", visible=False)
 
                     # Preset Save/Load Section
                     with gr.Accordion("💾 Preset Management", open=True):
@@ -2796,12 +2903,20 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
         fn=update_aspect_ratio_and_resolution,
         inputs=[base_resolution_width, base_resolution_height, aspect_ratio],
         outputs=[aspect_ratio, video_width, video_height],
+    ).then(
+        fn=update_cropped_image_only,
+        inputs=[image, auto_crop_image, video_width, video_height],
+        outputs=[cropped_display, image_resolution_label, cropped_resolution_label, image_to_use]
     )
 
     base_resolution_height.change(
         fn=update_aspect_ratio_and_resolution,
         inputs=[base_resolution_width, base_resolution_height, aspect_ratio],
         outputs=[aspect_ratio, video_width, video_height],
+    ).then(
+        fn=update_cropped_image_only,
+        inputs=[image, auto_crop_image, video_width, video_height],
+        outputs=[cropped_display, image_resolution_label, cropped_resolution_label, image_to_use]
     )
 
 
@@ -2809,6 +2924,10 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
         fn=update_resolution,
         inputs=[aspect_ratio, base_resolution_width, base_resolution_height],
         outputs=[video_width, video_height],
+    ).then(
+        fn=update_cropped_image_only,
+        inputs=[image, auto_crop_image, video_width, video_height],
+        outputs=[cropped_display, image_resolution_label, cropped_resolution_label, image_to_use]
     )
 
     # Hook up randomize seed
@@ -2850,13 +2969,26 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
     image.change(
         fn=on_image_upload,
         inputs=[image, auto_crop_image, video_width, video_height],
-        outputs=[cropped_display, aspect_ratio, video_width, video_height, image_to_use]
+        outputs=[cropped_display, image_resolution_label, aspect_ratio, video_width, video_height, cropped_resolution_label, image_to_use]
     )
 
     auto_crop_image.change(
         fn=on_image_upload,
         inputs=[image, auto_crop_image, video_width, video_height],
-        outputs=[cropped_display, aspect_ratio, video_width, video_height, image_to_use]
+        outputs=[cropped_display, image_resolution_label, aspect_ratio, video_width, video_height, cropped_resolution_label, image_to_use]
+    )
+
+    # Auto-update cropped image when video width/height changes manually
+    video_width.change(
+        fn=update_cropped_image_only,
+        inputs=[image, auto_crop_image, video_width, video_height],
+        outputs=[cropped_display, image_resolution_label, cropped_resolution_label, image_to_use]
+    )
+
+    video_height.change(
+        fn=update_cropped_image_only,
+        inputs=[image, auto_crop_image, video_width, video_height],
+        outputs=[cropped_display, image_resolution_label, cropped_resolution_label, image_to_use]
     )
 
     # Hook up open outputs folder button
