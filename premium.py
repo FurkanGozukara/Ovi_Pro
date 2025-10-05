@@ -285,7 +285,9 @@ def generate_video(
     vae_tiled_decode,
     vae_tile_size,
     vae_tile_overlap,
-    force_exact_resolution,
+    base_resolution_width,
+    base_resolution_height,
+    duration_seconds,
     auto_crop_image=True,  # Default to True for backward compatibility
 ):
     global ovi_engine
@@ -293,12 +295,18 @@ def generate_video(
     # Reset cancellation flag at the start of each generation request
     reset_cancellation()
 
+    # Start timing
+    import time
+    generation_start_time = time.time()
+
     # Debug: Log current generation parameters
     print("=" * 80)
     print("VIDEO GENERATION STARTED")
     print(f"  Text prompt: {text_prompt[:50]}{'...' if len(text_prompt) > 50 else ''}")
     print(f"  Image path: {image}")
     print(f"  Resolution: {video_frame_height}x{video_frame_width}")
+    print(f"  Base Resolution: {base_resolution_width}x{base_resolution_height}")
+    print(f"  Duration: {duration_seconds} seconds")
     print(f"  Seed: {video_seed}")
     print("=" * 80)
 
@@ -333,9 +341,17 @@ def generate_video(
             print(f"  Note: Models will be loaded in main process (Clear All Memory disabled)")
             print("=" * 80)
 
+            # Calculate latent lengths based on duration
+            video_latent_length, audio_latent_length = calculate_latent_lengths(duration_seconds)
+
             DEFAULT_CONFIG['cpu_offload'] = final_cpu_offload
             DEFAULT_CONFIG['mode'] = "t2v"
-            ovi_engine = OviFusionEngine(blocks_to_swap=final_blocks_to_swap, cpu_offload=final_cpu_offload)
+            ovi_engine = OviFusionEngine(
+                blocks_to_swap=final_blocks_to_swap,
+                cpu_offload=final_cpu_offload,
+                video_latent_length=video_latent_length,
+                audio_latent_length=audio_latent_length
+            )
             print("\n[OK] OviFusionEngine initialized successfully (models will load on first generation)")
 
         image_path = None
@@ -353,7 +369,12 @@ def generate_video(
                     iw, ih = img.size
                     if ih > 0 and iw > 0:
                         aspect = iw / ih
-                        closest_key = min(ASPECT_RATIOS.keys(), key=lambda k: abs(ASPECT_RATIOS[k][0] / ASPECT_RATIOS[k][1] - aspect))
+                        # Calculate aspect ratios from ratio strings and find closest match
+                        def get_ratio_value(ratio_str):
+                            w, h = map(float, ratio_str.split(':'))
+                            return w / h
+
+                        closest_key = min(ASPECT_RATIOS.keys(), key=lambda k: abs(get_ratio_value(k) - aspect))
                         target_w, target_h = ASPECT_RATIOS[closest_key]
                         print(f"[DEBUG] Detected aspect ratio: {closest_key} -> {target_w}x{target_h}")
 
@@ -454,7 +475,9 @@ def generate_video(
                         'vae_tiled_decode': vae_tiled_decode,
                         'vae_tile_size': vae_tile_size,
                         'vae_tile_overlap': vae_tile_overlap,
-                        'force_exact_resolution': force_exact_resolution,
+                        'base_resolution_width': base_resolution_width,
+                        'base_resolution_height': base_resolution_height,
+                        'duration_seconds': duration_seconds,
                         'auto_crop_image': auto_crop_image,
                     }
 
@@ -497,7 +520,6 @@ def generate_video(
                 vae_tiled_decode=vae_tiled_decode,
                 vae_tile_size=vae_tile_size,
                 vae_tile_overlap=vae_tile_overlap,
-                force_exact_resolution=force_exact_resolution,
             )
 
             # Get next available filename in sequential format
@@ -538,7 +560,9 @@ def generate_video(
                     'vae_tiled_decode': vae_tiled_decode,
                     'vae_tile_size': vae_tile_size,
                     'vae_tile_overlap': vae_tile_overlap,
-                    'force_exact_resolution': force_exact_resolution,
+                    'base_resolution_width': base_resolution_width,
+                    'base_resolution_height': base_resolution_height,
+                    'duration_seconds': duration_seconds,
                     'video_negative_prompt': video_negative_prompt,
                     'audio_negative_prompt': audio_negative_prompt,
                     'is_batch': False
@@ -546,6 +570,11 @@ def generate_video(
                 save_generation_metadata(output_path, generation_params, current_seed)
 
             print(f"[GENERATION {gen_idx + 1}/{int(num_generations)}] Completed: {output_filename}")
+
+        # Calculate and log total generation time
+        generation_end_time = time.time()
+        total_generation_time = generation_end_time - generation_start_time
+        print(f"  Total generation time: {total_generation_time:.2f} seconds")
 
         # Debug: Log final output path
         print("=" * 80)
@@ -571,22 +600,140 @@ def generate_video(
 
 
 
-# Supported aspect ratios and resolutions from config
-ASPECT_RATIOS = {
-    "16:9 Landscape": [992, 512],
-    "9:16 Portrait": [512, 992],
-    "9:16 Portrait (960)": [512, 960],
-    "16:9 Landscape (960)": [960, 512],
-    "4:3 Standard": [896, 672],
-    "3:4 Portrait": [672, 896],
-    "1:1 Square": [720, 720],
-    "5:2 Ultra-wide": [448, 1120]
-}
+# Standard aspect ratios
+def get_common_aspect_ratios(base_width, base_height):
+    """Get the standard aspect ratios, scaled to preserve total pixel area."""
+    # Calculate total pixel area from base resolution
+    total_pixels = base_width * base_height
 
-def update_resolution(aspect_ratio):
-    if aspect_ratio in ASPECT_RATIOS:
-        return ASPECT_RATIOS[aspect_ratio]
-    return [512, 992]  # Default fallback
+    # Define aspect ratios as width:height ratios
+    aspect_ratios_def = {
+        "1:1": (1, 1),
+        "16:9": (16, 9),
+        "9:16": (9, 16),
+        "4:3": (4, 3),
+        "3:4": (3, 4),
+        "21:9": (21, 9),
+        "9:21": (9, 21),
+        "3:2": (3, 2),
+        "2:3": (2, 3),
+        "5:4": (5, 4),
+        "4:5": (4, 5),
+        "5:3": (5, 3),
+        "3:5": (3, 5),
+        "16:10": (16, 10),
+        "10:16": (10, 16),
+    }
+
+    aspect_ratios = {}
+    for name, (w_ratio, h_ratio) in aspect_ratios_def.items():
+        # Calculate dimensions that preserve total pixel area and aspect ratio
+        aspect = w_ratio / h_ratio
+
+        # height = sqrt(total_pixels / aspect)
+        height = (total_pixels / aspect) ** 0.5
+
+        # width = height * aspect
+        width = height * aspect
+
+        # Round to nearest integers
+        width = int(round(width))
+        height = int(round(height))
+
+        # Snap to 32px for model compatibility (round to nearest multiple of 32)
+        width = max(32, ((width + 15) // 32) * 32)  # Round up to nearest 32
+        height = max(32, ((height + 15) // 32) * 32)  # Round up to nearest 32
+
+        aspect_ratios[name] = [width, height]
+
+    return aspect_ratios
+
+# Dynamic aspect ratios based on base resolution (legacy function)
+def get_aspect_ratios(base_width, base_height):
+    """Generate aspect ratios scaled from 720p base resolution."""
+    return get_common_aspect_ratios(base_width, base_height)
+
+# For backward compatibility, keep a default ASPECT_RATIOS
+ASPECT_RATIOS = get_aspect_ratios(720, 720)
+
+def update_resolution(aspect_ratio, base_resolution_width=720, base_resolution_height=720):
+    """Update resolution based on aspect ratio and base resolution."""
+    try:
+        # Validate inputs
+        if not isinstance(base_resolution_width, (int, float)) or not isinstance(base_resolution_height, (int, float)):
+            return [992, 512]  # Default fallback
+
+        if base_resolution_width <= 0 or base_resolution_height <= 0:
+            return [992, 512]  # Default fallback
+
+        current_ratios = get_aspect_ratios(base_resolution_width, base_resolution_height)
+
+        # Extract ratio name from display string (e.g., "16:9 - 960x544px" -> "16:9")
+        ratio_name = aspect_ratio.split(" - ")[0] if " - " in aspect_ratio else aspect_ratio
+
+        if ratio_name in current_ratios:
+            return current_ratios[ratio_name]
+        return [992, 512]  # Default fallback to 16:9
+    except Exception as e:
+        print(f"Error updating resolution: {e}")
+        return [992, 512]  # Default fallback
+
+def update_aspect_ratio_choices(base_resolution_width, base_resolution_height):
+    """Update aspect ratio dropdown choices based on base resolution."""
+    try:
+        # Validate inputs - ensure they're numbers and positive
+        if not isinstance(base_resolution_width, (int, float)) or not isinstance(base_resolution_height, (int, float)):
+            # Return current choices if inputs are invalid
+            current_ratios = get_common_aspect_ratios(720, 720)
+            choices = [f"{name} - {w}x{h}px" for name, (w, h) in current_ratios.items()]
+            return gr.update(choices=choices)
+
+        if base_resolution_width <= 0 or base_resolution_height <= 0:
+            # Return current choices if inputs are invalid
+            current_ratios = get_common_aspect_ratios(720, 720)
+            choices = [f"{name} - {w}x{h}px" for name, (w, h) in current_ratios.items()]
+            return gr.update(choices=choices)
+
+        current_ratios = get_common_aspect_ratios(base_resolution_width, base_resolution_height)
+
+        # Return aspect ratio names with resolution info
+        choices = [f"{name} - {w}x{h}px" for name, (w, h) in current_ratios.items()]
+
+        return gr.update(choices=choices)
+    except Exception as e:
+        print(f"Error updating aspect ratio choices: {e}")
+        # Fallback to default
+        current_ratios = get_common_aspect_ratios(720, 720)
+        choices = [f"{name} - {w}x{h}px" for name, (w, h) in current_ratios.items()]
+        return gr.update(choices=choices)
+
+def calculate_latent_lengths(duration_seconds):
+    """Calculate video_latent_length and audio_latent_length based on duration.
+
+    Current reference: 5 seconds = 31 video latents, 157 audio latents
+    Video: 5s * 24fps = 120 frames → 120/31 ≈ 3.87× temporal upscale
+    Audio: 5s * 16000Hz = 80000 samples → 80000/157 ≈ 510× temporal upscale
+    """
+    # Scale from the 5-second reference
+    video_latent_length = max(1, round((duration_seconds / 5.0) * 31))
+    audio_latent_length = max(1, round((duration_seconds / 5.0) * 157))
+
+    return video_latent_length, audio_latent_length
+
+def get_vram_warnings(base_resolution_width, base_resolution_height, duration_seconds):
+    """Generate VRAM warnings based on settings."""
+    warnings = []
+
+    # Check base resolution
+    base_size = min(base_resolution_width, base_resolution_height)
+    if base_size > 720:
+        warnings.append(f"⚠️ Base resolution ({base_size}p) > 720p may use significantly more VRAM")
+
+    # Check duration
+    if duration_seconds > 5:
+        warnings.append(f"⚠️ Duration ({duration_seconds}s) > 5s may use significantly more VRAM")
+
+    return "\n".join(warnings) if warnings else ""
 
 def get_random_seed():
     import random
@@ -716,10 +863,29 @@ def get_available_presets():
 PRESET_VERSION = "3.2"
 PRESET_MIN_COMPATIBLE_VERSION = "3.0"
 
+# Aspect ratio migration mapping (old names -> new names)
+ASPECT_RATIO_MIGRATION = {
+    "1:1 Square": "1:1",
+    "16:9 Landscape": "16:9",
+    "9:16 Portrait": "9:16",
+    "4:3 Landscape": "4:3",
+    "3:4 Portrait": "3:4",
+    "21:9 Landscape": "21:9",
+    "9:21 Portrait": "9:21",
+    "3:2 Landscape": "3:2",
+    "2:3 Portrait": "2:3",
+    "5:4 Landscape": "5:4",
+    "4:5 Portrait": "4:5",
+    "5:3 Landscape": "5:3",
+    "3:5 Portrait": "3:5",
+    "16:10 Widescreen": "16:10",
+    "10:16 Tall Widescreen": "10:16",
+}
+
 # Default values for all preset parameters (used for validation and migration)
 PRESET_DEFAULTS = {
     "video_text_prompt": "",
-    "aspect_ratio": "16:9 Landscape",
+    "aspect_ratio": "16:9",
     "video_width": 992,
     "video_height": 512,
     "auto_crop_image": True,
@@ -748,7 +914,9 @@ PRESET_DEFAULTS = {
     "vae_tiled_decode": False,
     "vae_tile_size": 32,
     "vae_tile_overlap": 8,
-    "force_exact_resolution": False,
+    "base_resolution_width": 720,
+    "base_resolution_height": 720,
+    "duration_seconds": 5,
 }
 
 # Parameter validation rules
@@ -765,7 +933,10 @@ PRESET_VALIDATION = {
     "blocks_to_swap": {"type": int, "min": 0, "max": 29},
     "vae_tile_size": {"type": int, "min": 12, "max": 64},
     "vae_tile_overlap": {"type": int, "min": 4, "max": 16},
-    "aspect_ratio": {"type": str, "choices": list(ASPECT_RATIOS.keys())},
+    "base_resolution_width": {"type": int},
+    "base_resolution_height": {"type": int},
+    "duration_seconds": {"type": int},
+    "aspect_ratio": {"type": str, "choices": ["1:1", "16:9", "9:16", "4:3", "3:4", "21:9", "9:21", "3:2", "2:3", "5:4", "4:5", "5:3", "3:5", "16:10", "10:16"]},
     "solver_name": {"type": str, "choices": ["unipc", "euler", "dpm++"]},
 }
 
@@ -796,6 +967,14 @@ def validate_preset_value(param_name, value):
         # If conversion fails, use default
         print(f"[PRESET] Type conversion failed for {param_name}, using default")
         value = PRESET_DEFAULTS[param_name]
+
+    # Special handling for aspect_ratio migration
+    if param_name == "aspect_ratio" and isinstance(value, str):
+        # Check if it's an old aspect ratio name that needs migration
+        if value in ASPECT_RATIO_MIGRATION:
+            new_value = ASPECT_RATIO_MIGRATION[value]
+            print(f"[PRESET] Migrated aspect ratio: '{value}' -> '{new_value}'")
+            value = new_value
 
     # Apply specific validation rules if they exist
     if param_name in PRESET_VALIDATION:
@@ -860,10 +1039,12 @@ def cleanup_invalid_presets():
 def migrate_preset_data(preset_data):
     """Migrate preset data from older versions to current format."""
     version = preset_data.get("preset_version", "1.0")  # Assume old version if missing
+    migrated = False
 
     # Version-specific migrations
     if version < "3.0":
         print(f"[PRESET] Migrating preset from version {version} to {PRESET_VERSION}")
+        migrated = True
 
         # Add missing parameters with defaults
         for param, default_value in PRESET_DEFAULTS.items():
@@ -875,9 +1056,19 @@ def migrate_preset_data(preset_data):
         # Example: if "old_param_name" in preset_data:
         #     preset_data["new_param_name"] = preset_data.pop("old_param_name")
 
-    # Update version
-    preset_data["preset_version"] = PRESET_VERSION
-    preset_data["migrated_at"] = datetime.now().isoformat()
+    # Always check for aspect ratio migration (regardless of version)
+    if "aspect_ratio" in preset_data:
+        old_aspect_ratio = preset_data["aspect_ratio"]
+        if old_aspect_ratio in ASPECT_RATIO_MIGRATION:
+            new_aspect_ratio = ASPECT_RATIO_MIGRATION[old_aspect_ratio]
+            preset_data["aspect_ratio"] = new_aspect_ratio
+            print(f"[PRESET] Migrated aspect ratio: '{old_aspect_ratio}' -> '{new_aspect_ratio}'")
+            migrated = True
+
+    # Update version if migration occurred
+    if migrated:
+        preset_data["preset_version"] = PRESET_VERSION
+        preset_data["migrated_at"] = datetime.now().isoformat()
 
     return preset_data
 
@@ -934,7 +1125,8 @@ def save_preset(preset_name, current_preset,
                 blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
                 video_negative_prompt, audio_negative_prompt,
                 batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
-                vae_tiled_decode, vae_tile_size, vae_tile_overlap, force_exact_resolution):
+                vae_tiled_decode, vae_tile_size, vae_tile_overlap,
+                base_resolution_width, base_resolution_height, duration_seconds):
     """Save current UI state as a preset."""
     try:
         presets_dir = get_presets_dir()
@@ -945,7 +1137,7 @@ def save_preset(preset_name, current_preset,
 
         if not preset_name.strip():
             presets = get_available_presets()
-            return gr.update(choices=presets, value=None), gr.update(value=""), *[gr.update() for _ in range(30)], "Please enter a preset name or select a preset to overwrite"
+            return gr.update(choices=presets, value=None), gr.update(value=""), *[gr.update() for _ in range(31)], "Please enter a preset name or select a preset to overwrite"
 
         preset_file = os.path.join(presets_dir, f"{preset_name}.json")
 
@@ -982,7 +1174,9 @@ def save_preset(preset_name, current_preset,
             "vae_tiled_decode": vae_tiled_decode,
             "vae_tile_size": vae_tile_size,
             "vae_tile_overlap": vae_tile_overlap,
-            "force_exact_resolution": force_exact_resolution,
+            "base_resolution_width": base_resolution_width,
+            "base_resolution_height": base_resolution_height,
+            "duration_seconds": duration_seconds,
             "saved_at": datetime.now().isoformat()
         }
 
@@ -1004,20 +1198,20 @@ def save_preset(preset_name, current_preset,
 
     except Exception as e:
         presets = get_available_presets()
-        return gr.update(choices=presets, value=None), gr.update(value=""), *[gr.update() for _ in range(30)], f"Error saving preset: {e}"
+        return gr.update(choices=presets, value=None), gr.update(value=""), *[gr.update() for _ in range(31)], f"Error saving preset: {e}"
 
 def load_preset(preset_name):
     """Load a preset and return all UI values with robust error handling."""
     try:
         if not preset_name:
-            return [gr.update() for _ in range(31)] + [gr.update(value=None)] + ["No preset selected"]
+            return [gr.update() for _ in range(32)] + [gr.update(value=None)] + ["No preset selected"]
 
         # Use the robust loading system
         preset_data, error_msg = load_preset_safely(preset_name)
 
         if preset_data is None:
             # Loading failed, return error state
-            return [gr.update() for _ in range(31)] + [gr.update(value=None)] + [error_msg]
+            return [gr.update() for _ in range(32)] + [gr.update(value=None)] + [error_msg]
 
         # Save as last used for auto-load (only if loading succeeded)
         try:
@@ -1028,11 +1222,16 @@ def load_preset(preset_name):
         except Exception as e:
             print(f"[PRESET] Warning: Could not save last used preset: {e}")
 
+        # Get current aspect ratio choices to convert stored value to display format
+        current_ratios = get_common_aspect_ratios(preset_data.get("base_resolution_width", 720), preset_data.get("base_resolution_height", 720))
+        stored_ratio = preset_data["aspect_ratio"]
+        display_ratio = f"{stored_ratio} - {current_ratios[stored_ratio][0]}x{current_ratios[stored_ratio][1]}px" if stored_ratio in current_ratios else stored_ratio
+
         # Return all UI updates in the correct order
         # This order must match the Gradio UI component order exactly
         return (
             gr.update(value=preset_data["video_text_prompt"]),
-            gr.update(value=preset_data["aspect_ratio"]),
+            gr.update(value=display_ratio),
             gr.update(value=preset_data["video_width"]),
             gr.update(value=preset_data["video_height"]),
             gr.update(value=preset_data["auto_crop_image"]),
@@ -1061,7 +1260,9 @@ def load_preset(preset_name):
             gr.update(value=preset_data["vae_tiled_decode"]),
             gr.update(value=preset_data["vae_tile_size"]),
             gr.update(value=preset_data["vae_tile_overlap"]),
-            gr.update(value=preset_data["force_exact_resolution"]),
+            gr.update(value=preset_data["base_resolution_width"]),
+            gr.update(value=preset_data["base_resolution_height"]),
+            gr.update(value=preset_data["duration_seconds"]),
             gr.update(value=preset_name),  # Update dropdown value
             f"Preset '{preset_name}' loaded successfully!"
         )
@@ -1069,7 +1270,7 @@ def load_preset(preset_name):
     except Exception as e:
         error_msg = f"Unexpected error loading preset: {e}"
         print(f"[PRESET] {error_msg}")
-        return [gr.update() for _ in range(31)] + [gr.update(value=None)] + [error_msg]
+        return [gr.update() for _ in range(32)] + [gr.update(value=None)] + [error_msg]
 
 def initialize_app_with_auto_load():
     """Initialize app with preset dropdown choices and auto-load last preset or VRAM-based preset."""
@@ -1183,10 +1384,14 @@ def initialize_app_with_auto_load():
 
         # Return initialized dropdown with VRAM-optimized defaults
         # The order must match the outputs list in demo.load()
+        # Initialize aspect ratio choices with resolution info
+        default_ratios = get_common_aspect_ratios(720, 720)
+        initial_aspect_choices = gr.update(choices=[f"{name} - {w}x{h}px" for name, (w, h) in default_ratios.items()])
+
         return (
             dropdown_update,  # preset_dropdown
             gr.update(),  # video_text_prompt
-            gr.update(),  # aspect_ratio
+            initial_aspect_choices,  # aspect_ratio
             gr.update(),  # video_width
             gr.update(),  # video_height
             gr.update(),  # auto_crop_image
@@ -1215,14 +1420,16 @@ def initialize_app_with_auto_load():
             vae_tiled_decode_update,  # vae_tiled_decode (potentially modified)
             gr.update(),  # vae_tile_size
             gr.update(),  # vae_tile_overlap
-            gr.update(),  # force_exact_resolution
+            gr.update(),  # base_resolution_width
+            gr.update(),  # base_resolution_height
+            gr.update(),  # duration_seconds
             status_message  # status message
         )
 
     except Exception as e:
         print(f"Warning: Could not initialize app with auto-load: {e}")
         presets = get_available_presets()
-        return gr.update(choices=presets, value=None), *[gr.update() for _ in range(31)], ""
+        return gr.update(choices=presets, value=None), *[gr.update() for _ in range(32)], ""
 
 def initialize_app():
     """Initialize app with preset dropdown choices."""
@@ -1243,6 +1450,8 @@ VIDEO PARAMETERS:
 - Image Path: {generation_params.get('image_path', 'None')}
 - Resolution: {generation_params.get('video_frame_height', 'N/A')}x{generation_params.get('video_frame_width', 'N/A')}
 - Aspect Ratio: {generation_params.get('aspect_ratio', 'N/A')}
+- Base Resolution: {generation_params.get('base_resolution_width', 720)}x{generation_params.get('base_resolution_height', 720)}
+- Duration: {generation_params.get('duration_seconds', 5)} seconds
 - Seed Used: {used_seed}
 - Randomize Seed: {generation_params.get('randomize_seed', False)}
 - Number of Generations: {generation_params.get('num_generations', 1)}
@@ -1268,7 +1477,6 @@ VAE OPTIMIZATION:
 - Tiled VAE Decode: {generation_params.get('vae_tiled_decode', False)}
 - VAE Tile Size: {generation_params.get('vae_tile_size', 'N/A')}
 - VAE Tile Overlap: {generation_params.get('vae_tile_overlap', 'N/A')}
-- Force Exact Resolution: {generation_params.get('force_exact_resolution', False)}
 
 NEGATIVE PROMPTS:
 - Video: {generation_params.get('video_negative_prompt', 'N/A')}
@@ -1356,6 +1564,9 @@ def process_batch_generation(
     vae_tiled_decode,
     vae_tile_size,
     vae_tile_overlap,
+    base_resolution_width,
+    base_resolution_height,
+    duration_seconds,
 ):
     """Process batch generation from input folder."""
     global ovi_engine
@@ -1410,9 +1621,17 @@ def process_batch_generation(
             print(f"  Note: Models will be loaded in main process (Clear All Memory disabled)")
             print("=" * 80)
 
+            # Calculate latent lengths based on duration
+            video_latent_length, audio_latent_length = calculate_latent_lengths(duration_seconds)
+
             DEFAULT_CONFIG['cpu_offload'] = final_cpu_offload
             DEFAULT_CONFIG['mode'] = "t2v"
-            ovi_engine = OviFusionEngine(blocks_to_swap=final_blocks_to_swap, cpu_offload=final_cpu_offload)
+            ovi_engine = OviFusionEngine(
+                blocks_to_swap=final_blocks_to_swap,
+                cpu_offload=final_cpu_offload,
+                video_latent_length=video_latent_length,
+                audio_latent_length=audio_latent_length
+            )
             print("\n[OK] OviFusionEngine initialized successfully for batch processing")
 
         processed_count = 0
@@ -1492,7 +1711,9 @@ def process_batch_generation(
                         'vae_tiled_decode': vae_tiled_decode,
                         'vae_tile_size': vae_tile_size,
                         'vae_tile_overlap': vae_tile_overlap,
-                        'force_exact_resolution': force_exact_resolution,
+                        'base_resolution_width': base_resolution_width,
+                        'base_resolution_height': base_resolution_height,
+                        'duration_seconds': duration_seconds,
                         'auto_crop_image': auto_crop_image,
                     }
 
@@ -1537,7 +1758,6 @@ def process_batch_generation(
                     vae_tiled_decode=vae_tiled_decode,
                     vae_tile_size=vae_tile_size,
                     vae_tile_overlap=vae_tile_overlap,
-                    force_exact_resolution=force_exact_resolution,
                 )
 
                     # Get filename with base_name prefix
@@ -1578,7 +1798,9 @@ def process_batch_generation(
                             'vae_tiled_decode': vae_tiled_decode,
                             'vae_tile_size': vae_tile_size,
                             'vae_tile_overlap': vae_tile_overlap,
-                            'force_exact_resolution': force_exact_resolution,
+                            'base_resolution_width': base_resolution_width,
+                            'base_resolution_height': base_resolution_height,
+                            'duration_seconds': duration_seconds,
                             'video_negative_prompt': video_negative_prompt,
                             'audio_negative_prompt': audio_negative_prompt,
                             'is_batch': True
@@ -1621,9 +1843,13 @@ def load_i2v_example_with_resolution(prompt, img_path):
             return (prompt, img_path, gr.update(), gr.update(), gr.update(), img_path)
         
         aspect = iw / ih
-        
-        # Find closest aspect ratio
-        closest_key = min(ASPECT_RATIOS.keys(), key=lambda k: abs(ASPECT_RATIOS[k][0] / ASPECT_RATIOS[k][1] - aspect))
+
+        # Calculate aspect ratios from ratio strings and find closest match
+        def get_ratio_value(ratio_str):
+            w, h = map(float, ratio_str.split(':'))
+            return w / h
+
+        closest_key = min(ASPECT_RATIOS.keys(), key=lambda k: abs(get_ratio_value(k) - aspect))
         target_w, target_h = ASPECT_RATIOS[closest_key]
         
         return (
@@ -1638,7 +1864,7 @@ def load_i2v_example_with_resolution(prompt, img_path):
         print(f"Error loading I2V example: {e}")
         return (prompt, img_path, gr.update(), gr.update(), gr.update(), img_path)
 
-def on_image_upload(image_path, auto_crop_image, video_width, video_height, force_exact_resolution):
+def on_image_upload(image_path, auto_crop_image, video_width, video_height):
     print(f"[DEBUG] on_image_upload called with image_path: {image_path}")
     if image_path is None:
         print("[DEBUG] No image provided, clearing state")
@@ -1657,14 +1883,14 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height, forc
         if ih == 0 or iw == 0:
             raise ValueError("Invalid image dimensions")
 
-        # If force_exact_resolution is enabled, use the user-specified dimensions (snapped to 32px)
-        if force_exact_resolution and video_width and video_height:
+        # Always use exact resolution (snapped to 32px for compatibility)
+        if video_width and video_height:
             # Snap to nearest multiples of 32 for compatibility
             target_w = max(32, (video_width // 32) * 32)
             target_h = max(32, (video_height // 32) * 32)
-            print(f"[AUTO-CROP] Force exact resolution enabled: using {target_w}x{target_h} (snapped to 32px)")
+            print(f"[AUTO-CROP] Using exact resolution: {target_w}x{target_h} (snapped to 32px)")
         else:
-            # Otherwise, find closest aspect ratio match
+            # Fallback: find closest aspect ratio match
             aspect = iw / ih
             closest_key = min(ASPECT_RATIOS.keys(), key=lambda k: abs(ASPECT_RATIOS[k][0] / ASPECT_RATIOS[k][1] - aspect))
             target_w, target_h = ASPECT_RATIOS[closest_key]
@@ -1695,11 +1921,11 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height, forc
         cropped.save(cropped_path)
 
         if auto_crop_image:
-            # Return the appropriate aspect ratio key if not using force_exact_resolution
-            if force_exact_resolution:
-                aspect_ratio_value = gr.update()  # Don't change aspect ratio dropdown
-            else:
-                aspect_ratio_value = gr.update(value=closest_key)
+            # Update aspect ratio dropdown to match detected ratio (with resolution info)
+            # Get current aspect ratios based on the target resolution
+            current_ratios = get_common_aspect_ratios(target_w, target_h)
+            display_value = f"{closest_key} - {current_ratios[closest_key][0]}x{current_ratios[closest_key][1]}px"
+            aspect_ratio_value = gr.update(value=display_value)
 
             print(f"[DEBUG] on_image_upload returning cropped path: {cropped_path}")
             return (
@@ -1757,10 +1983,10 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                         # Aspect ratio selection and resolution in same row
                         with gr.Row():
                             aspect_ratio = gr.Dropdown(
-                                choices=list(ASPECT_RATIOS.keys()),
-                                value="16:9 Landscape",
+                                choices=[f"{name} - {w}x{h}px" for name, (w, h) in get_common_aspect_ratios(720, 720).items()],
+                                value="16:9 - 992x512px",
                                 label="Aspect Ratio",
-                                info="Select aspect ratio - width and height will update automatically"
+                                info="Select aspect ratio - width and height will update automatically based on base resolution"
                             )
                             video_width = gr.Number(minimum=128, maximum=1920, value=992, step=32, label="Video Width")
                             video_height = gr.Number(minimum=128, maximum=1920, value=512, step=32, label="Video Height")
@@ -1860,10 +2086,26 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                                 value=True,
                                 info="Run each generation as separate process to clear VRAM/RAM (recommended)"
                             )
-                            force_exact_resolution = gr.Checkbox(
-                                label="Force Exact Resolution",
-                                value=False,
-                                info="Bypass area constraint and use exact width/height (may require more VRAM)"
+
+                        # Base Resolution and Duration Controls
+                        with gr.Row():
+                            base_resolution_width = gr.Number(
+                                value=720,
+                                label="Base Width",
+                                step=32,
+                                info="Base width for aspect ratio calculations (higher values use more VRAM)"
+                            )
+                            base_resolution_height = gr.Number(
+                                value=720,
+                                label="Base Height",
+                                step=32,
+                                info="Base height for aspect ratio calculations (higher values use more VRAM)"
+                            )
+                            duration_seconds = gr.Slider(
+                                value=5,
+                                step=1,
+                                label="Duration (seconds)",
+                                info="Video duration in seconds (longer durations use more VRAM)"
                             )
 
                         # T5 Text Encoder Options (all in one row)
@@ -2022,13 +2264,22 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                         <AUDCAP>Clear male voice, enthusiastic tone</AUDCAP>
                         ```
 
-                        ### 🎨 Supported Resolutions
-                        - **16:9 Landscape**: 992×512 (default)
-                        - **9:16 Portrait**: 512×992
-                        - **9:16 Portrait (960)**: 512×960
-                        - **16:9 Landscape (960)**: 960×512
-                        - **1:1 Square**: 720×720
-                        - **5:2 Ultra-wide**: 448×1120
+                        ### 🎨 Supported Aspect Ratios
+                        - **16:9**: Landscape (default)
+                        - **9:16**: Portrait
+                        - **4:3**: Standard landscape
+                        - **3:4**: Standard portrait
+                        - **21:9**: Ultra-wide
+                        - **9:21**: Ultra-tall
+                        - **1:1**: Square
+                        - **3:2**: Classic landscape
+                        - **2:3**: Classic portrait
+                        - **5:4**: Photo landscape
+                        - **4:5**: Photo portrait
+                        - **5:3**: Wide landscape
+                        - **3:5**: Tall portrait
+                        - **16:10**: Widescreen
+                        - **10:16**: Tall widescreen
                         """
                     )
 
@@ -2176,12 +2427,12 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
 
                         ### 🎬 Resolution Examples:
 
-                        **992×512 video (16:9 Landscape)**:
+                        **992×512 video (16:9)**:
                         - Latent size: 62×32
                         - With tile_size=32, overlap=8: ~2×1 = 2 tiles per frame
                         - VRAM saving: ~30% (12-15GB → 8-10GB during decode)
 
-                        **512×992 video (9:16 Portrait)**:
+                        **512×992 video (9:16)**:
                         - Latent size: 32×62
                         - With tile_size=32, overlap=8: ~1×2 = 2 tiles per frame
                         - VRAM saving: ~30%
@@ -2307,9 +2558,31 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                             )
 
     # Hook up aspect ratio change
+    # Update aspect ratio choices when base resolution changes
+    base_resolution_width.change(
+        fn=update_aspect_ratio_choices,
+        inputs=[base_resolution_width, base_resolution_height],
+        outputs=[aspect_ratio],
+    ).then(
+        fn=update_resolution,
+        inputs=[aspect_ratio, base_resolution_width, base_resolution_height],
+        outputs=[video_width, video_height],
+    )
+
+    base_resolution_height.change(
+        fn=update_aspect_ratio_choices,
+        inputs=[base_resolution_width, base_resolution_height],
+        outputs=[aspect_ratio],
+    ).then(
+        fn=update_resolution,
+        inputs=[aspect_ratio, base_resolution_width, base_resolution_height],
+        outputs=[video_width, video_height],
+    )
+
+
     aspect_ratio.change(
         fn=update_resolution,
-        inputs=[aspect_ratio],
+        inputs=[aspect_ratio, base_resolution_width, base_resolution_height],
         outputs=[video_width, video_height],
     )
 
@@ -2343,20 +2616,21 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             gr.Checkbox(value=False, visible=False), cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
             no_audio, gr.Checkbox(value=False, visible=False),
             num_generations, randomize_seed, save_metadata, aspect_ratio, clear_all,
-            vae_tiled_decode, vae_tile_size, vae_tile_overlap, force_exact_resolution, auto_crop_image,
+            vae_tiled_decode, vae_tile_size, vae_tile_overlap,
+            base_resolution_width, base_resolution_height, duration_seconds, auto_crop_image,
         ],
         outputs=[output_path],
     )
 
     image.change(
         fn=on_image_upload,
-        inputs=[image, auto_crop_image, video_width, video_height, force_exact_resolution],
+        inputs=[image, auto_crop_image, video_width, video_height],
         outputs=[cropped_display, aspect_ratio, video_width, video_height, image_to_use]
     )
 
     auto_crop_image.change(
         fn=on_image_upload,
-        inputs=[image, auto_crop_image, video_width, video_height, force_exact_resolution],
+        inputs=[image, auto_crop_image, video_width, video_height],
         outputs=[cropped_display, aspect_ratio, video_width, video_height, image_to_use]
     )
 
@@ -2385,6 +2659,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             delete_text_encoder, fp8_t5, cpu_only_t5, no_audio, gr.Checkbox(value=False, visible=False),
             num_generations, randomize_seed, save_metadata, aspect_ratio, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
+            base_resolution_width, base_resolution_height, duration_seconds,
         ],
         outputs=[output_path],
     )
@@ -2401,7 +2676,8 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
             video_negative_prompt, audio_negative_prompt,
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
-            vae_tiled_decode, vae_tile_size, vae_tile_overlap, force_exact_resolution,
+            vae_tiled_decode, vae_tile_size, vae_tile_overlap,
+            base_resolution_width, base_resolution_height, duration_seconds,
         ],
         outputs=[
             preset_dropdown, preset_name,  # Update dropdown, clear name field
@@ -2412,7 +2688,8 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
             video_negative_prompt, audio_negative_prompt,
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
-            vae_tiled_decode, vae_tile_size, vae_tile_overlap, force_exact_resolution,
+            vae_tiled_decode, vae_tile_size, vae_tile_overlap,
+            base_resolution_width, base_resolution_height, duration_seconds,
             gr.Textbox(visible=False)  # status message
         ],
     )
@@ -2428,8 +2705,9 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
             video_negative_prompt, audio_negative_prompt,
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
-            vae_tiled_decode, vae_tile_size, vae_tile_overlap, force_exact_resolution,
-            preset_dropdown, gr.Textbox(visible=False)  # Update current preset, status message
+            vae_tiled_decode, vae_tile_size, vae_tile_overlap,
+            base_resolution_width, base_resolution_height, duration_seconds,
+            preset_dropdown, gr.Textbox(visible=False)  # current preset, status message
         ],
     )
 
@@ -2445,8 +2723,9 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
             video_negative_prompt, audio_negative_prompt,
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
-            vae_tiled_decode, vae_tile_size, vae_tile_overlap, force_exact_resolution,
-            preset_dropdown, gr.Textbox(visible=False)  # Update current preset, status message
+            vae_tiled_decode, vae_tile_size, vae_tile_overlap,
+            base_resolution_width, base_resolution_height, duration_seconds,
+            preset_dropdown, gr.Textbox(visible=False)  # current preset, status message
         ],
     )
 
@@ -2470,7 +2749,8 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5,
             video_negative_prompt, audio_negative_prompt,
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
-            vae_tiled_decode, vae_tile_size, vae_tile_overlap, force_exact_resolution,
+            vae_tiled_decode, vae_tile_size, vae_tile_overlap,
+            base_resolution_width, base_resolution_height, duration_seconds,
             gr.Textbox(visible=False)  # status message
         ],
     )
@@ -2567,7 +2847,7 @@ if __name__ == "__main__":
             'num_generations': 1,
             'randomize_seed': False,
             'save_metadata': True,
-            'aspect_ratio': '16:9 Landscape',
+            'aspect_ratio': '16:9',
             'clear_all': False,
         }
         success = run_generation_subprocess(test_params)

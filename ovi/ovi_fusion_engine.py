@@ -22,7 +22,7 @@ from ovi.utils.processing_utils import clean_text, preprocess_image_tensor, snap
 DEFAULT_CONFIG = OmegaConf.load('ovi/configs/inference/inference_fusion.yaml')
 
 class OviFusionEngine:
-    def __init__(self, config=DEFAULT_CONFIG, device=0, target_dtype=torch.bfloat16, blocks_to_swap=0, cpu_offload=None):
+    def __init__(self, config=DEFAULT_CONFIG, device=0, target_dtype=torch.bfloat16, blocks_to_swap=0, cpu_offload=None, video_latent_length=None, audio_latent_length=None):
         # Store config and defer model loading
         self.device = device if isinstance(device, torch.device) else torch.device(f"cuda:{device}" if isinstance(device, int) else device)
         self.target_dtype = target_dtype
@@ -47,8 +47,9 @@ class OviFusionEngine:
         self.image_model = None
         self.audio_latent_channel = None
         self.video_latent_channel = None
-        self.audio_latent_length = 157
-        self.video_latent_length = 31
+        # Use provided latent lengths or defaults
+        self.audio_latent_length = audio_latent_length if audio_latent_length is not None else 157
+        self.video_latent_length = video_latent_length if video_latent_length is not None else 31
         self._vae_device = None
         
         # T5 configuration (set during first generation)

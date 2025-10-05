@@ -1,7 +1,7 @@
 {
   "preset_version": "3.2",
   "video_text_prompt": "",
-  "aspect_ratio": "16:9 Landscape",
+  "aspect_ratio": "16:9",
   "video_width": 992,
   "video_height": 512,
   "auto_crop_image": true,
