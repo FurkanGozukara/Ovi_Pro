@@ -638,6 +638,219 @@ def get_available_presets():
 
     return sorted(presets, key=sort_key)
 
+# Preset system constants
+PRESET_VERSION = "3.2"
+PRESET_MIN_COMPATIBLE_VERSION = "3.0"
+
+# Default values for all preset parameters (used for validation and migration)
+PRESET_DEFAULTS = {
+    "video_text_prompt": "",
+    "aspect_ratio": "16:9 Landscape",
+    "video_width": 992,
+    "video_height": 512,
+    "auto_crop_image": True,
+    "video_seed": 99,
+    "randomize_seed": False,
+    "no_audio": False,
+    "save_metadata": True,
+    "solver_name": "unipc",
+    "sample_steps": 50,
+    "num_generations": 1,
+    "shift": 5.0,
+    "video_guidance_scale": 4.0,
+    "audio_guidance_scale": 3.0,
+    "slg_layer": 11,
+    "blocks_to_swap": 12,
+    "cpu_offload": True,
+    "delete_text_encoder": True,
+    "fp8_t5": False,
+    "cpu_only_t5": False,
+    "video_negative_prompt": "jitter, bad hands, blur, distortion",
+    "audio_negative_prompt": "robotic, muffled, echo, distorted",
+    "batch_input_folder": "",
+    "batch_output_folder": "",
+    "batch_skip_existing": True,
+    "clear_all": True,
+    "vae_tiled_decode": False,
+    "vae_tile_size": 32,
+    "vae_tile_overlap": 8,
+    "force_exact_resolution": False,
+}
+
+# Parameter validation rules
+PRESET_VALIDATION = {
+    "video_width": {"type": int, "min": 128, "max": 1280},
+    "video_height": {"type": int, "min": 128, "max": 1280},
+    "video_seed": {"type": int, "min": 0, "max": 100000},
+    "sample_steps": {"type": int, "min": 1, "max": 100},
+    "num_generations": {"type": int, "min": 1, "max": 100},
+    "shift": {"type": float, "min": 0.0, "max": 20.0},
+    "video_guidance_scale": {"type": float, "min": 0.0, "max": 10.0},
+    "audio_guidance_scale": {"type": float, "min": 0.0, "max": 10.0},
+    "slg_layer": {"type": int, "min": -1, "max": 30},
+    "blocks_to_swap": {"type": int, "min": 0, "max": 29},
+    "vae_tile_size": {"type": int, "min": 12, "max": 64},
+    "vae_tile_overlap": {"type": int, "min": 4, "max": 16},
+    "aspect_ratio": {"type": str, "choices": list(ASPECT_RATIOS.keys())},
+    "solver_name": {"type": str, "choices": ["unipc", "euler", "dpm++"]},
+}
+
+def validate_preset_value(param_name, value):
+    """Validate a single preset parameter value."""
+    # Get expected type from defaults
+    expected_type = type(PRESET_DEFAULTS[param_name])
+
+    # Apply type conversion for all parameters
+    try:
+        if expected_type == int:
+            value = int(value)
+        elif expected_type == float:
+            value = float(value)
+        elif expected_type == str:
+            value = str(value)
+        elif expected_type == bool:
+            # Handle boolean conversion more carefully
+            if isinstance(value, bool):
+                pass  # Already correct type
+            elif isinstance(value, str):
+                # Convert string representations to boolean
+                value = value.lower() in ('true', '1', 'yes', 'on')
+            else:
+                # Convert other types (numbers, etc.) to boolean
+                value = bool(value)
+    except (ValueError, TypeError):
+        # If conversion fails, use default
+        print(f"[PRESET] Type conversion failed for {param_name}, using default")
+        value = PRESET_DEFAULTS[param_name]
+
+    # Apply specific validation rules if they exist
+    if param_name in PRESET_VALIDATION:
+        rule = PRESET_VALIDATION[param_name]
+
+        # Range validation
+        if "min" in rule and isinstance(value, (int, float)) and value < rule["min"]:
+            print(f"[PRESET] Warning: {param_name} value {value} below minimum {rule['min']}, using minimum")
+            value = rule["min"]
+        elif "max" in rule and isinstance(value, (int, float)) and value > rule["max"]:
+            print(f"[PRESET] Warning: {param_name} value {value} above maximum {rule['max']}, using maximum")
+            value = rule["max"]
+
+        # Choice validation
+        if "choices" in rule and value not in rule["choices"]:
+            print(f"[PRESET] Warning: {param_name} value '{value}' not in valid choices {rule['choices']}, using default")
+            value = PRESET_DEFAULTS[param_name]
+
+    return value
+
+def cleanup_invalid_presets():
+    """Remove presets that cannot be loaded or are corrupted."""
+    try:
+        presets_dir = get_presets_dir()
+        if not os.path.exists(presets_dir):
+            return 0
+
+        presets = get_available_presets()
+        removed_count = 0
+
+        for preset_name in presets:
+            preset_data, error_msg = load_preset_safely(preset_name)
+            if preset_data is None:
+                # Preset is invalid, remove it
+                preset_file = os.path.join(presets_dir, f"{preset_name}.json")
+                try:
+                    os.remove(preset_file)
+                    print(f"[PRESET] Removed invalid preset: {preset_name} ({error_msg})")
+                    removed_count += 1
+                except Exception as e:
+                    print(f"[PRESET] Failed to remove invalid preset {preset_name}: {e}")
+
+        # Also clean up the last_used.txt if it points to a non-existent preset
+        last_used_file = os.path.join(presets_dir, "last_used.txt")
+        if os.path.exists(last_used_file):
+            try:
+                with open(last_used_file, 'r', encoding='utf-8') as f:
+                    last_preset = f.read().strip()
+
+                if last_preset and last_preset not in get_available_presets():
+                    os.remove(last_used_file)
+                    print(f"[PRESET] Removed invalid last_used.txt reference to '{last_preset}'")
+            except Exception as e:
+                print(f"[PRESET] Error checking last_used.txt: {e}")
+
+        return removed_count
+
+    except Exception as e:
+        print(f"[PRESET] Error during preset cleanup: {e}")
+        return 0
+
+def migrate_preset_data(preset_data):
+    """Migrate preset data from older versions to current format."""
+    version = preset_data.get("preset_version", "1.0")  # Assume old version if missing
+
+    # Version-specific migrations
+    if version < "3.0":
+        print(f"[PRESET] Migrating preset from version {version} to {PRESET_VERSION}")
+
+        # Add missing parameters with defaults
+        for param, default_value in PRESET_DEFAULTS.items():
+            if param not in preset_data:
+                preset_data[param] = default_value
+                print(f"[PRESET] Added missing parameter: {param} = {default_value}")
+
+        # Handle renamed parameters (if any)
+        # Example: if "old_param_name" in preset_data:
+        #     preset_data["new_param_name"] = preset_data.pop("old_param_name")
+
+    # Update version
+    preset_data["preset_version"] = PRESET_VERSION
+    preset_data["migrated_at"] = datetime.now().isoformat()
+
+    return preset_data
+
+def load_preset_safely(preset_name):
+    """Load and validate preset data with error recovery."""
+    try:
+        import json
+        presets_dir = get_presets_dir()
+        preset_file = os.path.join(presets_dir, f"{preset_name}.json")
+
+        if not os.path.exists(preset_file):
+            return None, f"Preset '{preset_name}' not found"
+
+        with open(preset_file, 'r', encoding='utf-8') as f:
+            preset_data = json.load(f)
+
+        # Check version compatibility and migrate if needed
+        version = preset_data.get("preset_version", "1.0")
+
+        # Always attempt migration for any preset that doesn't match current version
+        if version != PRESET_VERSION:
+            preset_data = migrate_preset_data(preset_data)
+
+        # Only reject if migration failed or version is extremely old
+        migrated_version = preset_data.get("preset_version", "1.0")
+        if migrated_version < PRESET_MIN_COMPATIBLE_VERSION:
+            return None, f"Preset version {version} is too old and could not be migrated (minimum required: {PRESET_MIN_COMPATIBLE_VERSION})"
+
+        # Validate all parameters
+        validated_data = {}
+        for param_name, default_value in PRESET_DEFAULTS.items():
+            raw_value = preset_data.get(param_name, default_value)
+            validated_value = validate_preset_value(param_name, raw_value)
+            validated_data[param_name] = validated_value
+
+        # Include metadata fields
+        validated_data["preset_version"] = preset_data.get("preset_version", PRESET_VERSION)
+        if "migrated_at" in preset_data:
+            validated_data["migrated_at"] = preset_data["migrated_at"]
+
+        return validated_data, None
+
+    except json.JSONDecodeError as e:
+        return None, f"Invalid preset file format: {e}"
+    except Exception as e:
+        return None, f"Error loading preset: {e}"
+
 def save_preset(preset_name, current_preset,
                 # All UI parameters
                 video_text_prompt, aspect_ratio, video_width, video_height, auto_crop_image,
@@ -664,6 +877,7 @@ def save_preset(preset_name, current_preset,
 
         # Collect all current settings
         preset_data = {
+            "preset_version": PRESET_VERSION,
             "video_text_prompt": video_text_prompt,
             "aspect_ratio": aspect_ratio,
             "video_width": video_width,
@@ -719,69 +933,78 @@ def save_preset(preset_name, current_preset,
         return gr.update(choices=presets, value=None), gr.update(value=""), *[gr.update() for _ in range(30)], f"Error saving preset: {e}"
 
 def load_preset(preset_name):
-    """Load a preset and return all UI values."""
+    """Load a preset and return all UI values with robust error handling."""
     try:
         if not preset_name:
             return [gr.update() for _ in range(31)] + [gr.update(value=None)] + ["No preset selected"]
 
-        presets_dir = get_presets_dir()
-        preset_file = os.path.join(presets_dir, f"{preset_name}.json")
+        # Use the robust loading system
+        preset_data, error_msg = load_preset_safely(preset_name)
 
-        if not os.path.exists(preset_file):
-            return [gr.update() for _ in range(30)] + [gr.update(value=None)] + [f"Preset '{preset_name}' not found"]
+        if preset_data is None:
+            # Loading failed, return error state
+            return [gr.update() for _ in range(31)] + [gr.update(value=None)] + [error_msg]
 
-        with open(preset_file, 'r', encoding='utf-8') as f:
-            import json
-            preset_data = json.load(f)
+        # Save as last used for auto-load (only if loading succeeded)
+        try:
+            presets_dir = get_presets_dir()
+            last_used_file = os.path.join(presets_dir, "last_used.txt")
+            with open(last_used_file, 'w', encoding='utf-8') as f:
+                f.write(preset_name)
+        except Exception as e:
+            print(f"[PRESET] Warning: Could not save last used preset: {e}")
 
-        # Save as last used for auto-load
-        last_used_file = os.path.join(presets_dir, "last_used.txt")
-        with open(last_used_file, 'w', encoding='utf-8') as f:
-            f.write(preset_name)
-
-        # Return all UI updates
+        # Return all UI updates in the correct order
+        # This order must match the Gradio UI component order exactly
         return (
-            gr.update(value=preset_data.get("video_text_prompt", "")),
-            gr.update(value=preset_data.get("aspect_ratio", "16:9 Landscape")),
-            gr.update(value=preset_data.get("video_width", 992)),
-            gr.update(value=preset_data.get("video_height", 512)),
-            gr.update(value=preset_data.get("auto_crop_image", True)),
-            gr.update(value=preset_data.get("video_seed", 99)),
-            gr.update(value=preset_data.get("randomize_seed", False)),
-            gr.update(value=preset_data.get("no_audio", False)),
-            gr.update(value=preset_data.get("save_metadata", True)),
-            gr.update(value=preset_data.get("solver_name", "unipc")),
-            gr.update(value=preset_data.get("sample_steps", 50)),
-            gr.update(value=preset_data.get("num_generations", 1)),
-            gr.update(value=preset_data.get("shift", 5.0)),
-            gr.update(value=preset_data.get("video_guidance_scale", 4.0)),
-            gr.update(value=preset_data.get("audio_guidance_scale", 3.0)),
-            gr.update(value=preset_data.get("slg_layer", 11)),
-            gr.update(value=preset_data.get("blocks_to_swap", 12)),
-            gr.update(value=preset_data.get("cpu_offload", True)),
-            gr.update(value=preset_data.get("delete_text_encoder", True)),
-            gr.update(value=preset_data.get("fp8_t5", False)),
-            gr.update(value=preset_data.get("cpu_only_t5", False)),
-            gr.update(value=preset_data.get("video_negative_prompt", "jitter, bad hands, blur, distortion")),
-            gr.update(value=preset_data.get("audio_negative_prompt", "robotic, muffled, echo, distorted")),
-            gr.update(value=preset_data.get("batch_input_folder", "")),
-            gr.update(value=preset_data.get("batch_output_folder", "")),
-            gr.update(value=preset_data.get("batch_skip_existing", True)),
-            gr.update(value=preset_data.get("clear_all", True)),
-            gr.update(value=preset_data.get("vae_tiled_decode", False)),
-            gr.update(value=preset_data.get("vae_tile_size", 32)),
-            gr.update(value=preset_data.get("vae_tile_overlap", 8)),
-            gr.update(value=preset_data.get("force_exact_resolution", False)),
+            gr.update(value=preset_data["video_text_prompt"]),
+            gr.update(value=preset_data["aspect_ratio"]),
+            gr.update(value=preset_data["video_width"]),
+            gr.update(value=preset_data["video_height"]),
+            gr.update(value=preset_data["auto_crop_image"]),
+            gr.update(value=preset_data["video_seed"]),
+            gr.update(value=preset_data["randomize_seed"]),
+            gr.update(value=preset_data["no_audio"]),
+            gr.update(value=preset_data["save_metadata"]),
+            gr.update(value=preset_data["solver_name"]),
+            gr.update(value=preset_data["sample_steps"]),
+            gr.update(value=preset_data["num_generations"]),
+            gr.update(value=preset_data["shift"]),
+            gr.update(value=preset_data["video_guidance_scale"]),
+            gr.update(value=preset_data["audio_guidance_scale"]),
+            gr.update(value=preset_data["slg_layer"]),
+            gr.update(value=preset_data["blocks_to_swap"]),
+            gr.update(value=preset_data["cpu_offload"]),
+            gr.update(value=preset_data["delete_text_encoder"]),
+            gr.update(value=preset_data["fp8_t5"]),
+            gr.update(value=preset_data["cpu_only_t5"]),
+            gr.update(value=preset_data["video_negative_prompt"]),
+            gr.update(value=preset_data["audio_negative_prompt"]),
+            gr.update(value=preset_data["batch_input_folder"]),
+            gr.update(value=preset_data["batch_output_folder"]),
+            gr.update(value=preset_data["batch_skip_existing"]),
+            gr.update(value=preset_data["clear_all"]),
+            gr.update(value=preset_data["vae_tiled_decode"]),
+            gr.update(value=preset_data["vae_tile_size"]),
+            gr.update(value=preset_data["vae_tile_overlap"]),
+            gr.update(value=preset_data["force_exact_resolution"]),
             gr.update(value=preset_name),  # Update dropdown value
             f"Preset '{preset_name}' loaded successfully!"
         )
 
     except Exception as e:
-        return [gr.update() for _ in range(31)] + [gr.update(value=None)] + [f"Error loading preset: {e}"]
+        error_msg = f"Unexpected error loading preset: {e}"
+        print(f"[PRESET] {error_msg}")
+        return [gr.update() for _ in range(31)] + [gr.update(value=None)] + [error_msg]
 
 def initialize_app_with_auto_load():
     """Initialize app with preset dropdown choices and auto-load last preset or VRAM-based preset."""
     try:
+        # Clean up any invalid presets before initializing
+        removed_count = cleanup_invalid_presets()
+        if removed_count > 0:
+            print(f"[PRESET] Cleaned up {removed_count} invalid preset(s)")
+
         presets = get_available_presets()
         dropdown_update = gr.update(choices=presets, value=None)
 
@@ -790,17 +1013,28 @@ def initialize_app_with_auto_load():
         last_used_file = os.path.join(presets_dir, "last_used.txt")
 
         if os.path.exists(last_used_file):
-            with open(last_used_file, 'r', encoding='utf-8') as f:
-                last_preset = f.read().strip()
+            try:
+                with open(last_used_file, 'r', encoding='utf-8') as f:
+                    last_preset = f.read().strip()
 
-            if last_preset and last_preset in presets:
-                print(f"Auto-loading last used preset: {last_preset}")
-                # Load the preset and update dropdown to select it
-                loaded_values = load_preset(last_preset)
-                # Return dropdown with selected preset + all loaded UI values
-                return gr.update(choices=presets, value=last_preset), *loaded_values[:-1], f"Auto-loaded preset '{last_preset}'"
-            else:
-                print(f"Last used preset '{last_preset}' not found, selecting VRAM-based preset")
+                if last_preset and last_preset in presets:
+                    print(f"Auto-loading last used preset: {last_preset}")
+                    # Load the preset and update dropdown to select it
+                    loaded_values = load_preset(last_preset)
+
+                    # Check if loading was successful (last element is the status message)
+                    status_message = loaded_values[-1]
+                    if "successfully" in status_message:
+                        # Return dropdown with selected preset + all loaded UI values
+                        return gr.update(choices=presets, value=last_preset), *loaded_values[:-1], f"Auto-loaded preset '{last_preset}'"
+                    else:
+                        print(f"[PRESET] Failed to auto-load preset '{last_preset}': {status_message}")
+                        print("[PRESET] Falling back to VRAM-based preset selection")
+                else:
+                    print(f"[PRESET] Last used preset '{last_preset}' not found in available presets")
+            except Exception as e:
+                print(f"[PRESET] Error reading last used preset file: {e}")
+                print("[PRESET] Falling back to VRAM-based preset selection")
 
         # No last used preset - detect VRAM and select best matching preset
         gpu_name, vram_gb = detect_gpu_info()
@@ -829,8 +1063,15 @@ def initialize_app_with_auto_load():
                     print(f"Auto-loading VRAM-based preset: {best_preset} (detected {vram_gb:.1f}GB VRAM)")
                     # Load the preset and update dropdown to select it
                     loaded_values = load_preset(best_preset)
-                    # Return dropdown with selected preset + all loaded UI values
-                    return gr.update(choices=presets, value=best_preset), *loaded_values[:-1], f"Auto-loaded VRAM-optimized preset '{best_preset}' ({vram_gb:.1f}GB GPU detected)"
+
+                    # Check if loading was successful
+                    status_message = loaded_values[-1]
+                    if "successfully" in status_message:
+                        # Return dropdown with selected preset + all loaded UI values
+                        return gr.update(choices=presets, value=best_preset), *loaded_values[:-1], f"Auto-loaded VRAM-optimized preset '{best_preset}' ({vram_gb:.1f}GB GPU detected)"
+                    else:
+                        print(f"[PRESET] Failed to auto-load VRAM-based preset '{best_preset}': {status_message}")
+                        print("[PRESET] Falling back to basic VRAM optimizations")
                 else:
                     print(f"No suitable VRAM-based preset found for {vram_gb:.1f}GB VRAM")
 
@@ -1412,7 +1653,7 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height, forc
 theme = gr.themes.Soft()
 theme.font = [gr.themes.GoogleFont("Inter"), "Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v3.2 : https://www.patreon.com/posts/140393220")
+    gr.Markdown("# Ovi Pro SECourses Premium App v3.3 : https://www.patreon.com/posts/140393220")
 
     image_to_use = gr.State(value=None)
 

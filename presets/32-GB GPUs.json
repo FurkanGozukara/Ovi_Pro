@@ -1,4 +1,5 @@
 {
+  "preset_version": "3.2",
   "video_text_prompt": "",
   "aspect_ratio": "16:9 Landscape",
   "video_width": 992,
@@ -30,5 +31,5 @@
   "vae_tile_size": 28,
   "vae_tile_overlap": 8,
   "force_exact_resolution": true,
-  "saved_at": "2025-10-05T03:21:37.098743"
+  "saved_at": "2025-10-05T12:09:59.503529"
 }
