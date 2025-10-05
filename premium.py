@@ -1980,20 +1980,45 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                             lines=10
                         )
 
-                        # Aspect ratio selection and resolution in same row
+                        # Aspect ratio and resolution in reorganized layout
                         with gr.Row():
-                            aspect_ratio = gr.Dropdown(
-                                choices=[f"{name} - {w}x{h}px" for name, (w, h) in get_common_aspect_ratios(720, 720).items()],
-                                value="16:9 - 992x512px",
-                                label="Aspect Ratio",
-                                info="Select aspect ratio - width and height will update automatically based on base resolution"
+                            with gr.Column(scale=2, min_width=1):
+                                aspect_ratio = gr.Dropdown(
+                                    choices=[f"{name} - {w}x{h}px" for name, (w, h) in get_common_aspect_ratios(720, 720).items()],
+                                    value="16:9 - 992x512px",
+                                    label="Aspect Ratio",
+                                    info="Select aspect ratio - width and height will update automatically based on base resolution"
+                                )
+                            with gr.Column(scale=2, min_width=1):
+                                with gr.Row():
+                                    video_width = gr.Number(minimum=128, maximum=1920, value=992, step=32, label="Video Width")
+                                    video_height = gr.Number(minimum=128, maximum=1920, value=512, step=32, label="Video Height")
+                            with gr.Column(scale=1, min_width=1):
+                                auto_crop_image = gr.Checkbox(
+                                    value=True,
+                                    label="Auto Crop Image",
+                                    info="Automatically detect closest aspect ratio and crop image for perfect I2V generation"
+                                )
+
+                        # Base Resolution and Duration Controls
+                        with gr.Row():
+                            base_resolution_width = gr.Number(
+                                value=720,
+                                label="Base Width",
+                                step=32,
+                                info="Base width for aspect ratio calculations (higher values use more VRAM)"
                             )
-                            video_width = gr.Number(minimum=128, maximum=1920, value=992, step=32, label="Video Width")
-                            video_height = gr.Number(minimum=128, maximum=1920, value=512, step=32, label="Video Height")
-                            auto_crop_image = gr.Checkbox(
-                                value=True,
-                                label="Auto Crop Image",
-                                info="Automatically detect closest aspect ratio and crop image for perfect I2V generation"
+                            base_resolution_height = gr.Number(
+                                value=720,
+                                label="Base Height",
+                                step=32,
+                                info="Base height for aspect ratio calculations (higher values use more VRAM)"
+                            )
+                            duration_seconds = gr.Slider(
+                                value=5,
+                                step=1,
+                                label="Duration (seconds)",
+                                info="Video duration in seconds (longer durations use more VRAM)"
                             )
 
                         # Video seed, randomize checkbox, disable audio, and save metadata in same row
@@ -2087,26 +2112,6 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                                 info="Run each generation as separate process to clear VRAM/RAM (recommended)"
                             )
 
-                        # Base Resolution and Duration Controls
-                        with gr.Row():
-                            base_resolution_width = gr.Number(
-                                value=720,
-                                label="Base Width",
-                                step=32,
-                                info="Base width for aspect ratio calculations (higher values use more VRAM)"
-                            )
-                            base_resolution_height = gr.Number(
-                                value=720,
-                                label="Base Height",
-                                step=32,
-                                info="Base height for aspect ratio calculations (higher values use more VRAM)"
-                            )
-                            duration_seconds = gr.Slider(
-                                value=5,
-                                step=1,
-                                label="Duration (seconds)",
-                                info="Video duration in seconds (longer durations use more VRAM)"
-                            )
 
                         # T5 Text Encoder Options (all in one row)
                         with gr.Row():
