@@ -11,6 +11,10 @@ class FusionModel(nn.Module):
         super().__init__()
         has_video = True 
         has_audio = True
+        
+        # Initialize gradient checkpointing flag (used during training)
+        self.gradient_checkpointing = False
+        
         if video_config is not None:
             self.video_model = WanModel(**video_config)
         else:

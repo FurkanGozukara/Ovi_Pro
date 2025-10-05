@@ -376,18 +376,10 @@ class OviFusionEngine:
         
         print("Step 2/6: Loading checkpoint weights to CPU...")
         load_fusion_checkpoint(model, checkpoint_path=checkpoint_path, from_meta=meta_init)
-        
-        # Step 3: Convert dtype and eval (MUST stay on CPU to avoid VRAM spike!)
-        print(f"Step 3/6: Converting model to {self.target_dtype} on CPU...")
-        # CRITICAL: Explicitly specify device="cpu" to prevent PyTorch from materializing on GPU
-        model = model.to(device="cpu", dtype=self.target_dtype).eval()
         model.set_rope_params()
         
-        if torch.cuda.is_available():
-            after_load_vram = torch.cuda.memory_allocated(self.device) / 1e9
-            print(f"VRAM after loading to CPU: {after_load_vram:.2f} GB (should be ~0)")
-        
-        # Step 3.5: Apply FP8 optimization if enabled (BEFORE moving to device!)
+        # Step 3: Apply FP8 optimization BEFORE dtype conversion!
+        # This ensures FP8 checkpoint loads with correct dtypes
         if self.fp8_base_model:
             print("=" * 80)
             print("APPLYING FP8 OPTIMIZATION TO FUSION MODEL")
@@ -434,6 +426,10 @@ class OviFusionEngine:
                     save_fusion_fp8_checkpoint
                 )
                 
+                # Convert to bfloat16 first (quantization expects this)
+                print(f"[FP8] Converting model to {self.target_dtype} before quantization...")
+                model = model.to(device="cpu", dtype=self.target_dtype).eval()
+                
                 import time
                 quant_start = time.perf_counter()
                 
@@ -459,6 +455,14 @@ class OviFusionEngine:
                 print(f"  Compression ratio: {fp8_info['compression_ratio']:.2f}x")
                 print(f"  Memory saved: {fp8_info['params_before_mb'] - fp8_info['params_after_mb']:.1f} MB (~{(1 - fp8_info['compression_ratio']**-1) * 100:.0f}%)")
                 print("=" * 80)
+        else:
+            # No FP8: convert to target dtype normally
+            print(f"Step 3/6: Converting model to {self.target_dtype} on CPU...")
+            model = model.to(device="cpu", dtype=self.target_dtype).eval()
+        
+        if torch.cuda.is_available():
+            after_load_vram = torch.cuda.memory_allocated(self.device) / 1e9
+            print(f"VRAM after loading to CPU: {after_load_vram:.2f} GB (should be ~0)")
         
         # Step 4: Enable block swap BEFORE moving to device (critical!)
         if self.blocks_to_swap > 0:
@@ -471,8 +475,15 @@ class OviFusionEngine:
             
             # Step 5: Move to device EXCEPT swap blocks (saves VRAM!)
             print("Step 5/6: Moving model to GPU except swap blocks (optimal VRAM usage)...")
-            model.video_model.move_to_device_except_swap_blocks(self.device)
-            model.audio_model.move_to_device_except_swap_blocks(self.device)
+            
+            # Use FP8-preserving move if FP8 optimization is enabled
+            if self.fp8_base_model:
+                from ovi.utils.fp8_fusion_optimization_utils import move_wan_model_to_device_except_swap_blocks_preserve_fp8
+                move_wan_model_to_device_except_swap_blocks_preserve_fp8(model.video_model, self.device)
+                move_wan_model_to_device_except_swap_blocks_preserve_fp8(model.audio_model, self.device)
+            else:
+                model.video_model.move_to_device_except_swap_blocks(self.device)
+                model.audio_model.move_to_device_except_swap_blocks(self.device)
             
             if torch.cuda.is_available():
                 after_move_vram = torch.cuda.memory_allocated(self.device) / 1e9
@@ -500,7 +511,13 @@ class OviFusionEngine:
             # No block swap - load entire model to device normally
             print("Step 4/6: No block swap - moving entire model to device...")
             target_device = self.device if not self.cpu_offload else "cpu"
-            model = model.to(device=target_device)
+            
+            # Use FP8-preserving move if FP8 optimization is enabled
+            if self.fp8_base_model and target_device != "cpu":
+                from ovi.utils.fp8_fusion_optimization_utils import move_fusion_model_to_device_preserve_fp8
+                model = move_fusion_model_to_device_preserve_fp8(model, target_device)
+            else:
+                model = model.to(device=target_device)
             
             if torch.cuda.is_available():
                 after_load_vram = torch.cuda.memory_allocated(self.device) / 1e9
@@ -761,7 +778,12 @@ class OviFusionEngine:
             # CRITICAL: Don't move model to device if block swap is enabled!
             # Block swap already set up the device placement correctly.
             if self.cpu_offload and self.blocks_to_swap == 0:
-                self.model = self.model.to(self.device)
+                # Use FP8-preserving move if FP8 optimization is enabled
+                if self.fp8_base_model:
+                    from ovi.utils.fp8_fusion_optimization_utils import move_fusion_model_to_device_preserve_fp8
+                    self.model = move_fusion_model_to_device_preserve_fp8(self.model, self.device)
+                else:
+                    self.model = self.model.to(self.device)
                 print("[CPU Offload] Moving model to GPU for inference (no block swap)")
             
             # Log VRAM before inference starts

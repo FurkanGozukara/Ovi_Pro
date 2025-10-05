@@ -384,6 +384,106 @@ def apply_fusion_fp8_monkey_patch(fusion_model):
     return fusion_model
 
 
+def move_fusion_model_to_device_preserve_fp8(fusion_model, target_device):
+    """
+    Move fusion model to target device while preserving FP8 dtypes.
+    
+    Strategy:
+    1. Save FP8 Linear weights (dtype + data)
+    2. Move entire model using standard .to(device)
+    3. Restore FP8 dtypes for saved Linear weights
+    
+    Args:
+        fusion_model: FusionModel with FP8-optimized Linear layers
+        target_device: Target device (e.g., 'cuda:0')
+    
+    Returns:
+        fusion_model: Model moved to device with FP8 dtypes preserved
+    """
+    # Step 1: Identify and save FP8 Linear layers
+    fp8_layers = []
+    
+    # Video model
+    if fusion_model.video_model is not None:
+        for name, module in fusion_model.video_model.named_modules():
+            if isinstance(module, nn.Linear) and hasattr(module, 'scale_weight'):
+                if module.weight is not None and module.weight.dtype == torch.float8_e4m3fn:
+                    fp8_layers.append(('video', name, module))
+    
+    # Audio model
+    if fusion_model.audio_model is not None:
+        for name, module in fusion_model.audio_model.named_modules():
+            if isinstance(module, nn.Linear) and hasattr(module, 'scale_weight'):
+                if module.weight is not None and module.weight.dtype == torch.float8_e4m3fn:
+                    fp8_layers.append(('audio', name, module))
+    
+    logger.info(f"Found {len(fp8_layers)} FP8 Linear layers before device move")
+    
+    # Step 2: Move entire model to device (this converts FP8 to target dtype)
+    fusion_model = fusion_model.to(device=target_device)
+    
+    # Step 3: Restore FP8 dtypes for identified layers
+    restored_count = 0
+    for model_type, name, module in fp8_layers:
+        if module.weight is not None and hasattr(module, 'scale_weight'):
+            # Convert weight back to FP8
+            module.weight.data = module.weight.data.to(dtype=torch.float8_e4m3fn)
+            restored_count += 1
+    
+    logger.info(f"Restored {restored_count} FP8 Linear layers after device move to {target_device}")
+    print(f"[FP8] Moved model to {target_device} with {restored_count} FP8 weights preserved")
+    
+    return fusion_model
+
+
+def move_wan_model_to_device_except_swap_blocks_preserve_fp8(wan_model, device):
+    """
+    FP8-aware version of WanModel.move_to_device_except_swap_blocks().
+    Moves model to device while preserving FP8 dtypes in Linear layers.
+    
+    Strategy:
+    1. Identify FP8 Linear layers
+    2. Use original move logic (saves blocks, .to(), restores blocks)
+    3. Restore FP8 dtypes for identified layers
+    
+    Args:
+        wan_model: WanModel instance (video or audio)
+        device: Target device
+    
+    Returns:
+        wan_model: Model moved to device with FP8 preserved
+    """
+    # Step 1: Identify FP8 Linear layers before move
+    fp8_layers = []
+    for name, module in wan_model.named_modules():
+        if isinstance(module, nn.Linear) and hasattr(module, 'scale_weight'):
+            if module.weight is not None and module.weight.dtype == torch.float8_e4m3fn:
+                fp8_layers.append((name, module))
+    
+    # Step 2: Use original move logic (same as WanModel.move_to_device_except_swap_blocks)
+    if wan_model.blocks_to_swap:
+        save_blocks = wan_model.blocks
+        wan_model.blocks = None
+    
+    wan_model.to(device)
+    
+    if wan_model.blocks_to_swap:
+        wan_model.blocks = save_blocks
+    
+    # Step 3: Restore FP8 dtypes for identified layers
+    restored_count = 0
+    for name, module in fp8_layers:
+        if module.weight is not None and hasattr(module, 'scale_weight'):
+            # Convert weight back to FP8
+            module.weight.data = module.weight.data.to(dtype=torch.float8_e4m3fn)
+            restored_count += 1
+    
+    logger.info(f"Moved WanModel to {device}, preserved {restored_count} FP8 weights")
+    print(f"[FP8 Block Swap] Restored {restored_count} FP8 weights after move to {device}")
+    
+    return wan_model
+
+
 def save_fusion_fp8_checkpoint(fusion_model, cache_path):
     """Save FP8-optimized fusion model to cache file."""
     try:
@@ -407,16 +507,29 @@ def load_fusion_fp8_checkpoint(fusion_model, cache_path):
         print(f"[FP8 CACHE] Loading cached FP8 checkpoint from {cache_path}...")
         state_dict = load_file(cache_path)
         
+        # Debug: Check if FP8 weights are in the checkpoint
+        fp8_count_in_cache = sum(1 for k, v in state_dict.items() if v.dtype == torch.float8_e4m3fn)
+        print(f"[FP8 CACHE DEBUG] Found {fp8_count_in_cache} FP8 tensors in cached checkpoint")
+        
         # Ensure scale_weight buffers are registered
         _ensure_fp8_buffers(fusion_model, state_dict)
         
-        # Load state dict
-        missing, unexpected = fusion_model.load_state_dict(state_dict, strict=False)
+        # Load state dict with assign=True to preserve FP8 dtypes
+        # assign=True directly assigns tensors without dtype conversion
+        missing, unexpected = fusion_model.load_state_dict(state_dict, strict=False, assign=True)
         
         if missing:
-            logger.warning(f"Missing keys when loading cached FP8 checkpoint: {missing}")
+            logger.warning(f"Missing keys when loading cached FP8 checkpoint: {missing[:5]}... ({len(missing)} total)")
         if unexpected:
-            logger.warning(f"Unexpected keys when loading cached FP8 checkpoint: {unexpected}")
+            logger.warning(f"Unexpected keys when loading cached FP8 checkpoint: {unexpected[:5]}... ({len(unexpected)} total)")
+        
+        # Debug: Verify FP8 weights were loaded
+        fp8_count_after_load = 0
+        for name, module in fusion_model.named_modules():
+            if isinstance(module, nn.Linear):
+                if module.weight is not None and module.weight.dtype == torch.float8_e4m3fn:
+                    fp8_count_after_load += 1
+        print(f"[FP8 CACHE DEBUG] After loading: {fp8_count_after_load} Linear layers have FP8 weights")
         
         print(f"[FP8 CACHE] Loaded cached FP8 checkpoint successfully")
         return True
