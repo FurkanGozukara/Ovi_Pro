@@ -534,12 +534,10 @@ class T5EncoderModel:
         if shard_fn is not None:
             self.model = shard_fn(self.model, sync_module_states=False)
         else:
-            # For BF16 GPU mode, model is already on target device (optimized loading)
-            # For FP8 mode, model needs to be moved to device after quantization
-            # For CPU mode, model is already on CPU
+            # For FP8 mode, model needs to be moved to device after quantization on CPU
+            # For BF16 mode, model is already created on target device, no need to move
             if fp8:
                 self.model.to(self.device)
-            # BF16 mode: model already loaded to correct device, no need to move
         # init tokenizer
         self.tokenizer = HuggingfaceTokenizer(
             name=tokenizer_path, seq_len=text_len, clean='whitespace')
@@ -555,56 +553,40 @@ class T5EncoderModel:
 
     def _load_bf16_model(self, dtype, device, checkpoint_path):
         load_start = time.perf_counter()
-        # For CPU-only mode, avoid parallel building to minimize RAM spikes
-        # For GPU mode, use parallel building for faster loading
         is_cpu_only = (device == 'cpu' or (isinstance(device, str) and device == 'cpu'))
         
-        # OPTIMIZATION: For GPU mode, load weights directly to GPU to avoid CPU→GPU transfer
-        if is_cpu_only:
-            # CPU mode: load to CPU as before
-            map_location = 'cpu'
-        else:
-            # GPU mode: load directly to target GPU device
-            map_location = f'cuda:{device}' if isinstance(device, int) else str(device)
-        
-        print(f"[T5 LOAD][BF16] Loading weights directly to {map_location} (optimized path)")
-        
-        # Create model structure with meta device to avoid allocating memory
-        # We'll load weights directly in load_state_dict
-        # Note: build_parallel=True uses ThreadPoolExecutor to create 24 layers in parallel
-        # This reduces structure creation time from ~15-20s to ~8-12s
+        # OPTIMIZED: Create model structure directly on target device (GPU or CPU)
+        # This is FASTER than meta device because:
+        # 1. GPU structure creation is fast (~1-2s)
+        # 2. No meta→GPU materialization overhead
+        # 3. Simpler code path
+        logging.info(f'Creating T5 model structure on {device}...')
+        structure_start = time.perf_counter()
         model = umt5_xxl(
             encoder_only=True,
             return_tokenizer=False,
             dtype=dtype,
-            device='meta',  # Use meta device to avoid memory allocation
-            skip_init=True,
-            build_parallel=True).eval().requires_grad_(False)  # Always use parallel for speed
-        structure_time = time.perf_counter() - load_start
-        print(f"[T5 LOAD][BF16] Structure created in {structure_time:.2f}s (24 layers built in parallel)")
+            device=device).eval().requires_grad_(False)
+        structure_time = time.perf_counter() - structure_start
+        print(f"[T5 LOAD][BF16] Model structure created on {device} in {structure_time:.2f}s")
         
-        logging.info(f'loading {checkpoint_path}')
+        # Load weights to CPU first (PyTorch limitation with .pth files)
+        # Then load_state_dict will copy to target device automatically
+        logging.info(f'Loading weights from {checkpoint_path}')
         weights_start = time.perf_counter()
         
-        # Load weights with memory mapping for reduced RAM usage
-        # NOTE: torch.load() with .pth files MUST read to CPU RAM first (PyTorch limitation)
-        # map_location only controls where tensors END UP after deserialization
-        # mmap=True streams from disk to reduce peak RAM usage
         try:
-            # PyTorch 2.0+ supports mmap for reduced RAM pressure
-            state_dict = torch.load(checkpoint_path, map_location=map_location, mmap=True)
-            print(f"[T5 LOAD][BF16] Using memory-mapped loading (reduced RAM pressure)")
+            # PyTorch 2.0+ supports mmap for reduced peak RAM usage
+            model.load_state_dict(torch.load(checkpoint_path, map_location='cpu', mmap=True))
+            print(f"[T5 LOAD][BF16] Weights loaded with memory mapping (reduced RAM pressure)")
         except TypeError:
-            # Fallback for PyTorch < 2.0 (no mmap support)
-            state_dict = torch.load(checkpoint_path, map_location=map_location)
-            print(f"[T5 LOAD][BF16] Memory mapping not available (PyTorch < 2.0)")
-        
-        model.load_state_dict(state_dict, assign=True)  # assign=True for meta device
-        del state_dict
+            # Fallback for PyTorch < 2.0
+            model.load_state_dict(torch.load(checkpoint_path, map_location='cpu'))
+            print(f"[T5 LOAD][BF16] Weights loaded to CPU")
         
         weights_time = time.perf_counter() - weights_start
         total_time = time.perf_counter() - load_start
-        print(f"[T5 LOAD][BF16] Weights loaded directly to {map_location} in {weights_time:.2f}s (total {total_time:.2f}s)")
+        print(f"[T5 LOAD][BF16] Total loading time: {total_time:.2f}s (structure: {structure_time:.2f}s, weights: {weights_time:.2f}s)")
         return model
 
     def _load_fp8_model(self, dtype, device, checkpoint_path):
