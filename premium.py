@@ -41,6 +41,22 @@ def detect_gpu_info():
         print(f"GPU DETECTION ERROR: {e}")
         return None, 0
 
+def detect_system_ram():
+    """Detect total system RAM size."""
+    try:
+        import psutil
+        total_ram_gb = psutil.virtual_memory().total / (1024**3)
+
+        print("=" * 60)
+        print("SYSTEM RAM DETECTION RESULTS:")
+        print(f"  Total RAM: {total_ram_gb:.2f} GB")
+        print("=" * 60)
+
+        return total_ram_gb
+    except Exception as e:
+        print(f"SYSTEM RAM DETECTION ERROR: {e}")
+        return 0
+
 # ----------------------------
 # Parse CLI Args
 # ----------------------------
@@ -1687,6 +1703,36 @@ def load_preset(preset_name):
         if resolved_aspect_value not in aspect_ratio_choices:
             aspect_ratio_choices = [resolved_aspect_value] + aspect_ratio_choices
 
+        # Apply automatic memory-based optimizations after preset loading
+        gpu_name, vram_gb = detect_gpu_info()
+        ram_gb = detect_system_ram()
+
+        optimization_messages = []
+
+        # RAM-based optimization: Enable Delete T5 After Encoding for RAM < 128GB
+        if ram_gb > 0 and ram_gb < 63:
+            preset_data["delete_text_encoder"] = True
+            optimization_messages.append(f"RAM {ram_gb:.1f}GB < 128GB → Enabled Delete T5 After Encoding")
+            print(f"  ✓ RAM optimization: Enabled Delete T5 After Encoding (RAM: {ram_gb:.1f}GB < 128GB)")
+
+        # VRAM-based optimizations (same as before)
+        if vram_gb > 0:
+            if vram_gb < 23:
+                # Enable Scaled FP8 T5 and Tiled VAE for VRAM < 23GB
+                preset_data["fp8_t5"] = True
+                preset_data["vae_tiled_decode"] = True
+                optimization_messages.append(f"VRAM {vram_gb:.1f}GB < 23GB → Enabled Scaled FP8 T5 + Tiled VAE")
+                print(f"  ✓ VRAM optimization: Enabled Scaled FP8 T5 + Tiled VAE (VRAM: {vram_gb:.1f}GB < 23GB)")
+
+            if vram_gb > 40:
+                # Disable Clear All Memory for VRAM > 40GB
+                preset_data["clear_all"] = False
+                optimization_messages.append(f"VRAM {vram_gb:.1f}GB > 40GB → Disabled Clear All Memory")
+                print(f"  ✓ VRAM optimization: Disabled Clear All Memory (VRAM: {vram_gb:.1f}GB > 40GB)")
+
+        if optimization_messages:
+            print(f"[PRESET] Applied automatic optimizations for '{preset_name}': {', '.join(optimization_messages)}")
+
         # Return all UI updates in the correct order
         # This order must match the Gradio UI component order exactly
         return (
@@ -1725,7 +1771,7 @@ def load_preset(preset_name):
             gr.update(value=preset_data["base_resolution_height"]),
             gr.update(value=preset_data["duration_seconds"]),
             gr.update(value=preset_name),  # Update dropdown value
-            f"Preset '{preset_name}' loaded successfully!"
+            f"Preset '{preset_name}' loaded successfully!{' Applied optimizations: ' + ', '.join(optimization_messages) if optimization_messages else ''}"
         )
 
     except Exception as e:
@@ -1811,18 +1857,27 @@ def initialize_app_with_auto_load():
                 else:
                     print(f"No suitable VRAM-based preset found for {vram_gb:.1f}GB VRAM")
 
-        # Fallback: No preset to auto-load - check VRAM and apply basic optimizations
-        print("No preset auto-loaded - applying basic VRAM optimizations...")
+        # Fallback: No preset to auto-load - check RAM and VRAM and apply basic optimizations
+        print("No preset auto-loaded - applying basic memory optimizations...")
 
         gpu_name, vram_gb = detect_gpu_info()
+        ram_gb = detect_system_ram()
 
-        # Apply basic VRAM-based optimizations when no preset is loaded
+        # Apply basic memory-based optimizations when no preset is loaded
         fp8_t5_update = gr.update()  # Default: False
         vae_tiled_decode_update = gr.update()  # Default: False
         clear_all_update = gr.update()  # Default: True
+        delete_text_encoder_update = gr.update()  # Default: False
 
         optimization_messages = []
 
+        # RAM-based optimization: Enable Delete T5 After Encoding for RAM < 128GB
+        if ram_gb > 0 and ram_gb < 128:
+            delete_text_encoder_update = gr.update(value=True)
+            optimization_messages.append(f"RAM {ram_gb:.1f}GB < 128GB → Enabled Delete T5 After Encoding")
+            print(f"  ✓ RAM optimization: Enabled Delete T5 After Encoding (RAM: {ram_gb:.1f}GB < 128GB)")
+
+        # VRAM-based optimizations (same as before)
         if vram_gb > 0:
             if vram_gb < 23:
                 # Enable Scaled FP8 T5 and Tiled VAE for VRAM < 23GB
@@ -1838,10 +1893,10 @@ def initialize_app_with_auto_load():
                 print(f"  ✓ VRAM optimization: Disabled Clear All Memory (VRAM: {vram_gb:.1f}GB > 40GB)")
 
         if optimization_messages:
-            status_message = "Applied VRAM optimizations: " + ", ".join(optimization_messages)
+            status_message = "Applied memory optimizations: " + ", ".join(optimization_messages)
         else:
-            status_message = f"GPU detected ({gpu_name}, {vram_gb:.1f}GB VRAM) - using default settings"
-            print(f"  ✓ No VRAM optimizations needed (VRAM: {vram_gb:.1f}GB in optimal range)")
+            status_message = f"Hardware detected (RAM: {ram_gb:.1f}GB, GPU: {gpu_name}, VRAM: {vram_gb:.1f}GB) - using default settings"
+            print(f"  ✓ No memory optimizations needed (RAM: {ram_gb:.1f}GB, VRAM: {vram_gb:.1f}GB in optimal range)")
 
         # Return initialized dropdown with VRAM-optimized defaults
         # The order must match the outputs list in demo.load()
@@ -1872,7 +1927,7 @@ def initialize_app_with_auto_load():
             gr.update(),  # slg_layer
             gr.update(),  # blocks_to_swap
             gr.update(),  # cpu_offload
-            gr.update(),  # delete_text_encoder
+            delete_text_encoder_update,  # delete_text_encoder (potentially modified)
             fp8_t5_update,  # fp8_t5 (potentially modified)
             gr.update(),  # cpu_only_t5
             gr.update(),  # fp8_base_model
@@ -3516,6 +3571,12 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             i2v_examples.insert(0, (
                 "A stylish radio host in a professional studio leans into the microphone, adjusting his sunglasses and gesturing expressively. He says <S>Welcome back to Choice FM, you're listening to the hottest tracks in the city!</S> The camera slowly zooms in as he nods to the beat. <AUDCAP>Warm, confident male voice with professional radio tone, subtle background music, studio ambiance.<ENDAUDCAP>",
                 "example_prompts/pngs/5.png"
+            ))
+
+            # Add new example right after the featured one (as I2V Example 2)
+            i2v_examples.insert(1, (
+                "In a misty, ancient forest, a formidable warrior woman with a determined gaze sits astride a massive black panther with glowing golden eyes. The woman is clad from head to toe in dark, weathered plate armor and a tattered hood, a long spear resting on her shoulder. The panther, also fitted with rustic, worn barding, takes a slow, deliberate step forward. The woman looks directly at the viewer, her expression resolute as she speaks in a low, steady voice, <S>The shadows are our allies.<E>. As she finishes, the panther turns its head slightly, its glowing eyes locking onto the viewer, and emits a deep, rumbling growl.. <AUDCAP>Clear, low female voice speaking, accompanied by the faint, ambient sounds of a dense forest, the soft clinking of armor, and the deep, rumbling growl of a large cat.<ENDAUDCAP>",
+                "example_prompts/pngs/1.png"
             ))
             
             # Add fallback examples if CSV loading fails

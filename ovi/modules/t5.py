@@ -550,11 +550,16 @@ class T5EncoderModel:
 
     def _load_bf16_model(self, dtype, device, checkpoint_path):
         load_start = time.perf_counter()
+        # For CPU-only mode, avoid parallel building to minimize RAM spikes
+        # For GPU mode, use parallel building for faster loading
+        is_cpu_only = (device == 'cpu' or (isinstance(device, str) and device == 'cpu'))
         model = umt5_xxl(
             encoder_only=True,
             return_tokenizer=False,
             dtype=dtype,
-            device=device).eval().requires_grad_(False)
+            device=device,
+            skip_init=True,
+            build_parallel=False if is_cpu_only else True).eval().requires_grad_(False)
         structure_time = time.perf_counter() - load_start
         print(f"[T5 LOAD][BF16] Encoder structure created in {structure_time:.2f}s")
         logging.info(f'loading {checkpoint_path}')
