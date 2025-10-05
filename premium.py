@@ -659,6 +659,23 @@ def generate_video(
     enable_multiline_prompts=False,  # New: Enable multi-line prompt processing
     video_extension_count=0,  # New: Number of extension generations (auto-enables when > 0)
 ):
+    # If video_extension_count is 0, try to load it from the last used preset
+    if video_extension_count == 0:
+        try:
+            presets_dir = get_presets_dir()
+            last_used_file = os.path.join(presets_dir, "last_used.txt")
+            if os.path.exists(last_used_file):
+                with open(last_used_file, 'r', encoding='utf-8') as f:
+                    last_preset = f.read().strip()
+                if last_preset:
+                    preset_file = os.path.join(presets_dir, f"{last_preset}.json")
+                    if os.path.exists(preset_file):
+                        import json
+                        with open(preset_file, 'r', encoding='utf-8') as f:
+                            preset_data = json.load(f)
+                        video_extension_count = preset_data.get('video_extension_count', 0)
+        except Exception as e:
+            pass
     global ovi_engine
 
     # Reset cancellation flag at the start of each generation request
@@ -929,7 +946,7 @@ def generate_video(
                             'output_dir': outputs_dir,  # Pass output directory to subprocess
                             'text_embeddings_cache': text_embeddings_cache,  # Pass pre-encoded embeddings if available
                             'enable_multiline_prompts': False,  # Disable in subprocess
-                            'video_extension_count': 0,  # Disable extensions in subprocess
+                            'video_extension_count': video_extension_count,  # Pass through extension count
                     }
 
                     run_generation_subprocess(single_gen_params)
@@ -1068,7 +1085,7 @@ def generate_video(
                     print(f"[GENERATION {gen_idx + 1}/{int(num_generations)}] Saved to: {output_path}")
 
                     # Handle video extensions if enabled (skip when clear_all=True since subprocess handles it)
-                    if video_extension_count > 0:
+                    if video_extension_count > 0 and not clear_all:
                         print(f"[VIDEO EXTENSION] Starting {video_extension_count} extensions for prompt {prompt_idx + 1}")
 
                         extension_videos = [output_path]  # Start with the main video
@@ -2180,6 +2197,7 @@ def load_preset(preset_name):
         if optimization_messages:
             print(f"[PRESET] Applied automatic optimizations for '{preset_name}': {', '.join(optimization_messages)}")
 
+
         # Return all UI updates in the correct order
         # This order must match the Gradio UI component order exactly
         return (
@@ -2760,6 +2778,8 @@ def process_batch_generation(
                         'auto_crop_image': False,  # Image already cropped in main process
                         'base_filename': base_name,  # Use base name for batch processing
                         'output_dir': outputs_dir,  # Pass output directory to subprocess
+                        'enable_multiline_prompts': False,  # Disable in subprocess
+                        'video_extension_count': video_extension_count,  # Pass through extension count
                     }
 
                     success = run_generation_subprocess(single_gen_params)
