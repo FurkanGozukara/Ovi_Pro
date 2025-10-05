@@ -1,1 +1,1 @@
-6-GB GPUs
+8-GB GPUs

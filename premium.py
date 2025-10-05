@@ -656,56 +656,79 @@ def get_aspect_ratios(base_width, base_height):
 # For backward compatibility, keep a default ASPECT_RATIOS
 ASPECT_RATIOS = get_aspect_ratios(720, 720)
 
+def _coerce_positive_int(value):
+    """Safely coerce incoming UI values to positive integers."""
+    try:
+        if isinstance(value, bool):  # Guard against booleans (subclass of int)
+            return None
+        if isinstance(value, (int, float)):
+            coerced = int(value)
+        elif isinstance(value, str) and value.strip():
+            coerced = int(float(value.strip()))
+        else:
+            return None
+        return coerced if coerced > 0 else None
+    except (ValueError, TypeError):
+        return None
+
+def _extract_ratio_name(value):
+    if isinstance(value, str) and value:
+        return value.split(" - ")[0]
+    return None
+
+def _format_ratio_choice(name, dims):
+    return f"{name} - {dims[0]}x{dims[1]}px"
+
 def update_resolution(aspect_ratio, base_resolution_width=720, base_resolution_height=720):
     """Update resolution based on aspect ratio and base resolution."""
     try:
-        # Validate inputs
-        if not isinstance(base_resolution_width, (int, float)) or not isinstance(base_resolution_height, (int, float)):
-            return [992, 512]  # Default fallback
+        base_width = _coerce_positive_int(base_resolution_width)
+        base_height = _coerce_positive_int(base_resolution_height)
 
-        if base_resolution_width <= 0 or base_resolution_height <= 0:
-            return [992, 512]  # Default fallback
+        if base_width is None or base_height is None:
+            return [gr.update(), gr.update()]
 
-        current_ratios = get_aspect_ratios(base_resolution_width, base_resolution_height)
+        current_ratios = get_common_aspect_ratios(base_width, base_height)
 
-        # Extract ratio name from display string (e.g., "16:9 - 960x544px" -> "16:9")
-        ratio_name = aspect_ratio.split(" - ")[0] if " - " in aspect_ratio else aspect_ratio
+        ratio_name = _extract_ratio_name(aspect_ratio)
+        if ratio_name not in current_ratios:
+            ratio_name = "16:9" if "16:9" in current_ratios else next(iter(current_ratios))
 
-        if ratio_name in current_ratios:
-            return current_ratios[ratio_name]
-        return [992, 512]  # Default fallback to 16:9
+        width, height = current_ratios[ratio_name]
+        return [width, height]
     except Exception as e:
         print(f"Error updating resolution: {e}")
-        return [992, 512]  # Default fallback
+        return [gr.update(), gr.update()]
 
-def update_aspect_ratio_choices(base_resolution_width, base_resolution_height):
-    """Update aspect ratio dropdown choices based on base resolution."""
+def update_aspect_ratio_choices(base_resolution_width, base_resolution_height, current_aspect_ratio=None):
+    """Update aspect ratio dropdown choices based on base resolution with graceful handling during user input."""
     try:
-        # Validate inputs - ensure they're numbers and positive
-        if not isinstance(base_resolution_width, (int, float)) or not isinstance(base_resolution_height, (int, float)):
-            # Return current choices if inputs are invalid
-            current_ratios = get_common_aspect_ratios(720, 720)
-            choices = [f"{name} - {w}x{h}px" for name, (w, h) in current_ratios.items()]
-            return gr.update(choices=choices)
+        base_width = _coerce_positive_int(base_resolution_width)
+        base_height = _coerce_positive_int(base_resolution_height)
 
-        if base_resolution_width <= 0 or base_resolution_height <= 0:
-            # Return current choices if inputs are invalid
-            current_ratios = get_common_aspect_ratios(720, 720)
-            choices = [f"{name} - {w}x{h}px" for name, (w, h) in current_ratios.items()]
-            return gr.update(choices=choices)
+        if base_width is None or base_height is None:
+            # Keep existing dropdown state while the user is typing an invalid number
+            return gr.update()
 
-        current_ratios = get_common_aspect_ratios(base_resolution_width, base_resolution_height)
+        current_ratios = get_common_aspect_ratios(base_width, base_height)
+        choices = [_format_ratio_choice(name, dims) for name, dims in current_ratios.items()]
 
-        # Return aspect ratio names with resolution info
-        choices = [f"{name} - {w}x{h}px" for name, (w, h) in current_ratios.items()]
+        ratio_name = _extract_ratio_name(current_aspect_ratio)
+        if ratio_name not in current_ratios:
+            ratio_name = "16:9" if "16:9" in current_ratios else next(iter(current_ratios))
 
-        return gr.update(choices=choices)
+        selected_value = _format_ratio_choice(ratio_name, current_ratios[ratio_name])
+
+        if (
+            current_aspect_ratio
+            and current_aspect_ratio not in choices
+        ):
+            choices = [current_aspect_ratio] + choices
+
+        return gr.update(choices=choices, value=selected_value)
     except Exception as e:
         print(f"Error updating aspect ratio choices: {e}")
-        # Fallback to default
-        current_ratios = get_common_aspect_ratios(720, 720)
-        choices = [f"{name} - {w}x{h}px" for name, (w, h) in current_ratios.items()]
-        return gr.update(choices=choices)
+        return gr.update()
 
 def calculate_latent_lengths(duration_seconds):
     """Calculate video_latent_length and audio_latent_length based on duration.
@@ -1222,10 +1245,21 @@ def load_preset(preset_name):
         except Exception as e:
             print(f"[PRESET] Warning: Could not save last used preset: {e}")
 
-        # Get current aspect ratio choices to convert stored value to display format
-        current_ratios = get_common_aspect_ratios(preset_data.get("base_resolution_width", 720), preset_data.get("base_resolution_height", 720))
+        # Get aspect ratio choices based on DEFAULT base resolution (720x720) to ensure compatibility during initialization
+        # The aspect ratio will be properly updated when base_resolution_width/height change handlers run
+        default_ratios = get_common_aspect_ratios(720, 720)
         stored_ratio = preset_data["aspect_ratio"]
-        display_ratio = f"{stored_ratio} - {current_ratios[stored_ratio][0]}x{current_ratios[stored_ratio][1]}px" if stored_ratio in current_ratios else stored_ratio
+
+        # Extract the ratio name (e.g., "16:9" from "16:9 - 960x544px")
+        ratio_name = stored_ratio.split(" - ")[0] if " - " in stored_ratio else stored_ratio
+
+        # Generate display_ratio based on default ratios to ensure it's always valid during initialization
+        if ratio_name in default_ratios:
+            display_ratio = f"{ratio_name} - {default_ratios[ratio_name][0]}x{default_ratios[ratio_name][1]}px"
+        else:
+            # Fallback to 16:9 if the stored ratio is not available
+            display_ratio = f"16:9 - {default_ratios['16:9'][0]}x{default_ratios['16:9'][1]}px"
+            print(f"[PRESET] Warning: Stored aspect ratio '{ratio_name}' not found in default ratios, using 16:9")
 
         # Return all UI updates in the correct order
         # This order must match the Gradio UI component order exactly
@@ -2566,7 +2600,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
     # Update aspect ratio choices when base resolution changes
     base_resolution_width.change(
         fn=update_aspect_ratio_choices,
-        inputs=[base_resolution_width, base_resolution_height],
+        inputs=[base_resolution_width, base_resolution_height, aspect_ratio],
         outputs=[aspect_ratio],
     ).then(
         fn=update_resolution,
@@ -2576,7 +2610,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
 
     base_resolution_height.change(
         fn=update_aspect_ratio_choices,
-        inputs=[base_resolution_width, base_resolution_height],
+        inputs=[base_resolution_width, base_resolution_height, aspect_ratio],
         outputs=[aspect_ratio],
     ).then(
         fn=update_resolution,
