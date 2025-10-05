@@ -133,7 +133,7 @@ def is_target_layer(module_name):
     # Include attention and FFN layers
     include_patterns = [
         "self_attn.q",
-        "self_attn.k", 
+        "self_attn.k",
         "self_attn.v",
         "self_attn.o",
         "cross_attn.q",
@@ -142,9 +142,9 @@ def is_target_layer(module_name):
         "cross_attn.o",
         "cross_attn.k_fusion",
         "cross_attn.v_fusion",
-        "ffn.fc1",
-        "ffn.fc2",
-        "ffn.gate",
+        "ffn.0",  # FFN gate layer
+        "ffn.2",  # FFN fc1/fc2 layers
+        "ffn.4",  # Additional FFN layers if present
     ]
     
     return any(pattern in module_name for pattern in include_patterns)
@@ -153,12 +153,12 @@ def is_target_layer(module_name):
 def optimize_fusion_model_to_fp8(fusion_model, device='cpu', block_size=64):
     """
     Optimize FusionModel to FP8 by quantizing Linear layer weights in transformer blocks.
-    
+
     Args:
         fusion_model: FusionModel instance (video + audio models)
         device: Device for quantization computation ('cpu' recommended to avoid VRAM spike)
         block_size: Block size for per-block quantization
-    
+
     Returns:
         fusion_model: Modified model with FP8 weights and scale parameters
         info: Dictionary with optimization statistics
@@ -166,99 +166,146 @@ def optimize_fusion_model_to_fp8(fusion_model, device='cpu', block_size=64):
     fp8_dtype = torch.float8_e4m3fn
     max_value = calculate_fp8_maxval()
     min_value = -max_value
-    
+
     optimized_count = 0
+    skipped_count = 0
     total_params_before = 0
     total_params_after = 0
-    
+
     video_count = 0
     audio_count = 0
-    
+
     logger.info("Starting FP8 optimization of Fusion Model...")
     logger.info(f"  Target: Transformer blocks (video + audio)")
     logger.info(f"  Format: FP8 E4M3 with per-block scaling (block_size={block_size})")
-    
+
     # Find all target Linear layers in both video and audio models
     target_layers = []
-    
+    skipped_layers = []
+
     # Video model layers
     if fusion_model.video_model is not None:
         for name, module in fusion_model.video_model.named_modules():
             full_name = f"video_model.{name}"
-            if isinstance(module, nn.Linear) and is_target_layer(full_name):
-                target_layers.append((full_name, module, 'video'))
-    
+            if isinstance(module, nn.Linear):
+                if is_target_layer(full_name):
+                    target_layers.append((full_name, module, 'video'))
+                else:
+                    skipped_layers.append((full_name, 'not_target_layer'))
+
     # Audio model layers
     if fusion_model.audio_model is not None:
         for name, module in fusion_model.audio_model.named_modules():
             full_name = f"audio_model.{name}"
-            if isinstance(module, nn.Linear) and is_target_layer(full_name):
-                target_layers.append((full_name, module, 'audio'))
-    
-    logger.info(f"Found {len(target_layers)} Linear layers to optimize")
-    logger.info(f"  Video model: {sum(1 for _, _, t in target_layers if t == 'video')} layers")
-    logger.info(f"  Audio model: {sum(1 for _, _, t in target_layers if t == 'audio')} layers")
-    
+            if isinstance(module, nn.Linear):
+                if is_target_layer(full_name):
+                    target_layers.append((full_name, module, 'audio'))
+                else:
+                    skipped_layers.append((full_name, 'not_target_layer'))
+
+    logger.info(f"Found {len(target_layers)} Linear layers to optimize, {len(skipped_layers)} skipped")
+    logger.info(f"  Video model: {sum(1 for _, _, t in target_layers if t == 'video')} target layers")
+    logger.info(f"  Audio model: {sum(1 for _, _, t in target_layers if t == 'audio')} target layers")
+
+    # Debug: Show first few skipped layers
+    if skipped_layers:
+        logger.info("Sample of skipped layers:")
+        for name, reason in skipped_layers[:5]:
+            logger.info(f"  - {name}: {reason}")
+
     # Quantize each Linear layer
     for name, module, model_type in tqdm(target_layers, desc="Quantizing to FP8"):
         if module.weight is None:
+            logger.warning(f"Skipping {name}: no weight")
+            skipped_count += 1
             continue
-        
+
         original_weight = module.weight.data
+        original_shape = original_weight.shape
         original_device = original_weight.device
         original_dtype = original_weight.dtype
-        
+
         # Move to computation device
         weight = original_weight.to(device)
-        
+
         # Count parameters
-        total_params_before += weight.numel() * original_dtype.itemsize
-        
+        params_before = weight.numel()
+        total_params_before += params_before * original_dtype.itemsize
+
+        # Check if weight dimensions are compatible with block quantization
+        out_features, in_features = original_shape
+        can_use_block = in_features % block_size == 0 and weight.ndim == 2
+
+        logger.debug(f"Quantizing {name}: {original_shape} ({params_before:,} params) - Block compatible: {can_use_block}")
+
         # Quantize with per-block scaling
-        quantized_weight, scale_tensor = quantize_weight_block(
-            weight, fp8_dtype, max_value, min_value, block_size
-        )
-        
-        # Count parameters after (FP8 weights + scale in original dtype)
-        total_params_after += quantized_weight.numel() * fp8_dtype.itemsize
-        total_params_after += scale_tensor.numel() * original_dtype.itemsize
-        
-        # Move back to original device
-        quantized_weight = quantized_weight.to(original_device)
-        scale_tensor = scale_tensor.to(dtype=original_dtype, device=original_device)
-        
-        # Replace weight with FP8 version
-        del module.weight
-        module.weight = nn.Parameter(quantized_weight, requires_grad=False)
-        
-        # Register scale as buffer
-        module.register_buffer('scale_weight', scale_tensor)
-        
-        optimized_count += 1
-        if model_type == 'video':
-            video_count += 1
-        else:
-            audio_count += 1
-        
+        try:
+            quantized_weight, scale_tensor = quantize_weight_block(
+                weight, fp8_dtype, max_value, min_value, block_size
+            )
+
+            # Log quantization mode used
+            if scale_tensor.ndim == 1:
+                quant_mode = "per-tensor"
+            elif scale_tensor.ndim == 2:
+                quant_mode = "per-channel"
+            else:
+                quant_mode = f"per-block ({scale_tensor.shape[1]} blocks)"
+            logger.debug(f"  Mode: {quant_mode}, Scale shape: {scale_tensor.shape}")
+
+            # Count parameters after (FP8 weights + scale in original dtype)
+            params_fp8 = quantized_weight.numel()
+            params_scale = scale_tensor.numel()
+            total_params_after += params_fp8 * fp8_dtype.itemsize
+            total_params_after += params_scale * original_dtype.itemsize
+
+            # Move back to original device
+            quantized_weight = quantized_weight.to(original_device)
+            scale_tensor = scale_tensor.to(dtype=original_dtype, device=original_device)
+
+            # Replace weight with FP8 version
+            del module.weight
+            module.weight = nn.Parameter(quantized_weight, requires_grad=False)
+
+            # Register scale as buffer
+            module.register_buffer('scale_weight', scale_tensor)
+
+            logger.debug(f"  Success: FP8 {quantized_weight.shape}, Scale {scale_tensor.shape}")
+
+            optimized_count += 1
+            if model_type == 'video':
+                video_count += 1
+            else:
+                audio_count += 1
+
+        except Exception as e:
+            logger.warning(f"Failed to quantize {name}: {e}")
+            skipped_count += 1
+            continue
+
         # Free memory periodically
         if optimized_count % 20 == 0:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-    
+
+    logger.info(f"FP8 optimization complete:")
+    logger.info(f"  Successfully optimized: {optimized_count} layers ({video_count} video + {audio_count} audio)")
+    logger.info(f"  Skipped/failed: {skipped_count} layers")
+    logger.info(f"  Total target layers found: {len(target_layers)}")
+
     info = {
         'optimized_layers': optimized_count,
+        'skipped_layers': skipped_count,
         'video_layers': video_count,
         'audio_layers': audio_count,
         'params_before_mb': total_params_before / (1024 * 1024),
         'params_after_mb': total_params_after / (1024 * 1024),
         'compression_ratio': total_params_before / total_params_after if total_params_after > 0 else 1.0
     }
-    
-    logger.info(f"FP8 optimization complete:")
-    logger.info(f"  Optimized {optimized_count} Linear layers ({video_count} video + {audio_count} audio)")
+
     logger.info(f"  Model size: {info['params_before_mb']:.1f} MB -> {info['params_after_mb']:.1f} MB")
     logger.info(f"  Compression ratio: {info['compression_ratio']:.2f}x")
-    
+
     return fusion_model, info
 
 

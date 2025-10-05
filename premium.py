@@ -2853,7 +2853,7 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height):
 theme = gr.themes.Soft()
 theme.font = [gr.themes.GoogleFont("Inter"), "Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v4.0 : https://www.patreon.com/posts/140393220")
+    gr.Markdown("# Ovi Pro SECourses Premium App v4.1 : https://www.patreon.com/posts/140393220")
 
     image_to_use = gr.State(value=None)
 
