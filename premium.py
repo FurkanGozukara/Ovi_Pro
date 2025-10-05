@@ -359,57 +359,8 @@ def generate_video(
             # Handle image processing here to ensure we use the current image
             print(f"[DEBUG] Raw image path from upload: {image}")
 
-            # Use the auto_crop_image parameter from the UI
-            auto_crop_enabled = auto_crop_image
-
-            if auto_crop_enabled:
-                try:
-                    print("[DEBUG] Auto-cropping image for generation...")
-                    img = Image.open(image)
-                    iw, ih = img.size
-                    if ih > 0 and iw > 0:
-                        aspect = iw / ih
-                        # Calculate aspect ratios from ratio strings and find closest match
-                        def get_ratio_value(ratio_str):
-                            w, h = map(float, ratio_str.split(':'))
-                            return w / h
-
-                        closest_key = min(ASPECT_RATIOS.keys(), key=lambda k: abs(get_ratio_value(k) - aspect))
-                        target_w, target_h = ASPECT_RATIOS[closest_key]
-                        print(f"[DEBUG] Detected aspect ratio: {closest_key} -> {target_w}x{target_h}")
-
-                        target_aspect = target_w / target_h
-                        image_aspect = iw / ih
-
-                        # Center crop to target aspect
-                        if image_aspect > target_aspect:
-                            crop_w = int(ih * target_aspect)
-                            left = (iw - crop_w) // 2
-                            box = (left, 0, left + crop_w, ih)
-                        else:
-                            crop_h = int(iw / target_aspect)
-                            top = (ih - crop_h) // 2
-                            box = (0, top, iw, top + crop_h)
-
-                        cropped = img.crop(box).resize((target_w, target_h), Image.Resampling.LANCZOS)
-
-                        # Save to temp dir
-                        tmp_dir = os.path.join(os.path.dirname(__file__), "temp")
-                        os.makedirs(tmp_dir, exist_ok=True)
-                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                        cropped_path = os.path.join(tmp_dir, f"cropped_{timestamp}.png")
-                        cropped.save(cropped_path)
-                        image_path = cropped_path
-                        print(f"[DEBUG] Cropped image saved to: {cropped_path}")
-                    else:
-                        image_path = image
-                        print("[DEBUG] Invalid image dimensions, using original")
-                except Exception as e:
-                    print(f"[DEBUG] Auto-crop failed: {e}, using original image")
-                    image_path = image
-            else:
-                image_path = image
-                print(f"[DEBUG] Using original image path (no cropping): {image_path}")
+            # Apply auto cropping if enabled
+            image_path = apply_auto_crop_if_enabled(image, auto_crop_image, video_frame_width, video_frame_height)
 
             if os.path.exists(image_path):
                 print(f"[DEBUG] Final image file exists: Yes ({os.path.getsize(image_path)} bytes)")
@@ -1773,6 +1724,7 @@ def process_batch_generation(
     base_resolution_width,
     base_resolution_height,
     duration_seconds,
+    auto_crop_image,
 ):
     """Process batch generation from input folder."""
     global ovi_engine
@@ -1864,6 +1816,9 @@ def process_batch_generation(
             print(f"  Prompt: {text_prompt[:100]}{'...' if len(text_prompt) > 100 else ''}")
             print(f"  Image: {'Yes' if image_path else 'No'}")
 
+            # Apply auto cropping if enabled and image exists
+            final_image_path = apply_auto_crop_if_enabled(image_path, auto_crop_image, video_frame_width, video_frame_height)
+
             # Check if output already exists (for skip logic)
             expected_output = os.path.join(outputs_dir, f"{base_name}_0001.mp4")
             if skip_existing and os.path.exists(expected_output):
@@ -1889,7 +1844,7 @@ def process_batch_generation(
                     # Run this batch generation in a subprocess for memory cleanup
                     single_gen_params = {
                         'text_prompt': text_prompt,
-                        'image': image_path,
+                        'image': final_image_path,
                         'video_frame_height': video_frame_height,
                         'video_frame_width': video_frame_width,
                         'video_seed': current_seed,
@@ -1945,7 +1900,7 @@ def process_batch_generation(
                     generated_video, generated_audio, _ = generate_with_cancellation_check(
                     ovi_engine.generate,
                     text_prompt=text_prompt,
-                    image_path=image_path,
+                    image_path=final_image_path,
                     video_frame_height_width=[video_frame_height, video_frame_width],
                     seed=current_seed,
                     solver_name=solver_name,
@@ -1981,7 +1936,7 @@ def process_batch_generation(
                     if save_metadata:
                         generation_params = {
                             'text_prompt': text_prompt,
-                            'image_path': image_path,
+                            'image_path': final_image_path,
                             'video_frame_height': video_frame_height,
                             'video_frame_width': video_frame_width,
                             'aspect_ratio': aspect_ratio,
@@ -2073,6 +2028,70 @@ def load_i2v_example_with_resolution(prompt, img_path):
     except Exception as e:
         print(f"Error loading I2V example: {e}")
         return (prompt, img_path, gr.update(), gr.update(), gr.update(), img_path)
+
+def apply_auto_crop_if_enabled(image_path, auto_crop_image, target_width=None, target_height=None):
+    """Apply auto cropping to image if enabled. Returns the final image path to use."""
+    if not auto_crop_image or image_path is None or not os.path.exists(image_path):
+        return image_path
+
+    try:
+        print("[DEBUG] Auto-cropping image for generation...")
+        img = Image.open(image_path)
+        iw, ih = img.size
+        if ih > 0 and iw > 0:
+            aspect = iw / ih
+            # Calculate aspect ratios from ratio strings and find closest match
+            def get_ratio_value(ratio_str):
+                w, h = map(float, ratio_str.split(':'))
+                return w / h
+
+            if target_width and target_height:
+                # Use provided target dimensions
+                target_w, target_h = target_width, target_height
+                closest_key = None
+                # Find the closest standard aspect ratio for logging
+                for key in ASPECT_RATIOS.keys():
+                    if ASPECT_RATIOS[key] == [target_w, target_h]:
+                        closest_key = key
+                        break
+                if not closest_key:
+                    closest_key = f"{target_w}x{target_h}"
+            else:
+                # Calculate from standard aspect ratios
+                closest_key = min(ASPECT_RATIOS.keys(), key=lambda k: abs(get_ratio_value(k) - aspect))
+                target_w, target_h = ASPECT_RATIOS[closest_key]
+
+            print(f"[DEBUG] Detected aspect ratio: {closest_key} -> {target_w}x{target_h}")
+
+            target_aspect = target_w / target_h
+            image_aspect = iw / ih
+
+            # Center crop to target aspect
+            if image_aspect > target_aspect:
+                crop_w = int(ih * target_aspect)
+                left = (iw - crop_w) // 2
+                box = (left, 0, left + crop_w, ih)
+            else:
+                crop_h = int(iw / target_aspect)
+                top = (ih - crop_h) // 2
+                box = (0, top, iw, top + crop_h)
+
+            cropped = img.crop(box).resize((target_w, target_h), Image.Resampling.LANCZOS)
+
+            # Save to temp dir
+            tmp_dir = os.path.join(os.path.dirname(__file__), "temp")
+            os.makedirs(tmp_dir, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            cropped_path = os.path.join(tmp_dir, f"cropped_{timestamp}.png")
+            cropped.save(cropped_path)
+            print(f"[DEBUG] Cropped image saved to: {cropped_path}")
+            return cropped_path
+        else:
+            print("[DEBUG] Invalid image dimensions, using original")
+            return image_path
+    except Exception as e:
+        print(f"[DEBUG] Auto-crop failed: {e}, using original image")
+        return image_path
 
 def update_cropped_image_only(image_path, auto_crop_image, video_width, video_height):
     """Update only the cropped image and labels when resolution changes (doesn't update aspect ratio dropdown or width/height fields)."""
@@ -3016,7 +3035,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             delete_text_encoder, fp8_t5, cpu_only_t5, no_audio, gr.Checkbox(value=False, visible=False),
             num_generations, randomize_seed, save_metadata, aspect_ratio, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
-            base_resolution_width, base_resolution_height, duration_seconds,
+            base_resolution_width, base_resolution_height, duration_seconds, auto_crop_image,
         ],
         outputs=[output_path],
     )
