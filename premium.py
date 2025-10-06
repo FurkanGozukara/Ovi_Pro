@@ -466,6 +466,74 @@ if not share_enabled:
     print("Use --share flag to enable public access with a shareable URL")
 
 
+def validate_prompt_format(text_prompt):
+    """Validate prompt format for required tags.
+    
+    Requirements:
+    - At least one <S>...<E> pair (speech tags)
+    - <S> and <E> must be paired
+    - <AUDCAP> and <ENDAUDCAP> must be paired
+    - No other unknown tags allowed
+    
+    Returns:
+        tuple: (is_valid: bool, error_message: str or None)
+    """
+    import re
+    
+    if not text_prompt or not isinstance(text_prompt, str):
+        return False, "❌ Prompt is empty or invalid"
+    
+    # Find all tags in the prompt
+    all_tags = re.findall(r'<([^>]+)>', text_prompt)
+    
+    # Allowed tags
+    allowed_tags = {'S', 'E', 'AUDCAP', 'ENDAUDCAP'}
+    
+    # Check for unknown tags
+    unknown_tags = set(all_tags) - allowed_tags
+    if unknown_tags:
+        return False, f"❌ Unknown tags found: {', '.join(f'<{tag}>' for tag in unknown_tags)}\n\n✅ Only these tags are allowed: <S>, <E>, <AUDCAP>, <ENDAUDCAP>"
+    
+    # Count speech tags
+    s_count = text_prompt.count('<S>')
+    e_count = text_prompt.count('<E>')
+    
+    # Check for at least one <S>/<E> pair
+    if s_count == 0 or e_count == 0:
+        return False, "❌ Prompt must contain at least one <S>...<E> speech pair\n\nExample: A person says <S>Hello world<E>"
+    
+    # Check if <S> and <E> are balanced
+    if s_count != e_count:
+        return False, f"❌ Unbalanced speech tags: {s_count} <S> tags but {e_count} <E> tags\n\n✅ Each <S> must have a matching <E>"
+    
+    # Count audio caption tags
+    audcap_count = text_prompt.count('<AUDCAP>')
+    endaudcap_count = text_prompt.count('<ENDAUDCAP>')
+    
+    # Check if <AUDCAP> and <ENDAUDCAP> are balanced
+    if audcap_count != endaudcap_count:
+        return False, f"❌ Unbalanced audio caption tags: {audcap_count} <AUDCAP> tags but {endaudcap_count} <ENDAUDCAP> tags\n\n✅ Each <AUDCAP> must have a matching <ENDAUDCAP>"
+    
+    # Check proper ordering of tags (basic check)
+    # For <S> and <E>
+    s_positions = [m.start() for m in re.finditer(r'<S>', text_prompt)]
+    e_positions = [m.start() for m in re.finditer(r'<E>', text_prompt)]
+    
+    # Check that each <S> comes before its corresponding <E>
+    for i in range(len(s_positions)):
+        if i >= len(e_positions) or s_positions[i] >= e_positions[i]:
+            return False, f"❌ Invalid speech tag order: Each <S> must come before its matching <E>\n\nPosition {i+1}: <S> found but <E> is missing or in wrong position"
+    
+    # Similar check for <AUDCAP> and <ENDAUDCAP>
+    audcap_positions = [m.start() for m in re.finditer(r'<AUDCAP>', text_prompt)]
+    endaudcap_positions = [m.start() for m in re.finditer(r'<ENDAUDCAP>', text_prompt)]
+    
+    for i in range(len(audcap_positions)):
+        if i >= len(endaudcap_positions) or audcap_positions[i] >= endaudcap_positions[i]:
+            return False, f"❌ Invalid audio caption tag order: Each <AUDCAP> must come before its matching <ENDAUDCAP>\n\nPosition {i+1}: <AUDCAP> found but <ENDAUDCAP> is missing or in wrong position"
+    
+    return True, None
+
 def parse_multiline_prompts(text_prompt, enable_multiline_prompts):
     """Parse multi-line prompts into individual prompts, filtering out short lines."""
     if not enable_multiline_prompts:
@@ -958,6 +1026,15 @@ def generate_video(
 ):
     # Note: enable_video_extension is passed directly from UI and should be respected as-is
 
+    # CRITICAL: Validate prompt format before any processing
+    is_valid, error_message = validate_prompt_format(text_prompt)
+    if not is_valid:
+        print("=" * 80)
+        print("PROMPT VALIDATION FAILED")
+        print(error_message)
+        print("=" * 80)
+        raise ValueError(f"Invalid prompt format:\n\n{error_message}")
+    
     # Parse prompts for video extension validation (always parse to count lines)
     validation_prompts = parse_multiline_prompts(text_prompt, True)  # Always parse for validation
 
@@ -1035,11 +1112,21 @@ def generate_video(
     if enable_multiline_prompts:
         # When multi-line prompts enabled: generate separate videos for each prompt line
         individual_prompts = parse_multiline_prompts(text_prompt, enable_multiline_prompts)
+        # Validate each individual prompt line
+        for i, prompt_line in enumerate(individual_prompts):
+            line_valid, line_error = validate_prompt_format(prompt_line)
+            if not line_valid:
+                raise ValueError(f"Invalid prompt format in line {i+1}:\n\n{line_error}")
         # Disable video extensions when multi-line prompts are enabled
         video_extension_count = 0
     elif enable_video_extension and video_extension_count > 0:
         # When video extension enabled: only use the first prompt for the main generation
         individual_prompts = [validation_prompts[0]]  # Only first prompt for main generation
+        # Validate each extension prompt line
+        for i, prompt_line in enumerate(validation_prompts):
+            line_valid, line_error = validate_prompt_format(prompt_line)
+            if not line_valid:
+                raise ValueError(f"Invalid prompt format in line {i+1} (used for extension {i if i > 0 else 'main'}):\n\n{line_error}")
     else:
         # Default: single prompt
         individual_prompts = parse_multiline_prompts(text_prompt, False)
@@ -3089,9 +3176,27 @@ def process_batch_generation(
             except Exception as e:
                 print(f"[ERROR] Failed to read prompt file {txt_path}: {e}")
                 continue
+            
+            # Validate prompt format
+            is_valid, error_message = validate_prompt_format(raw_text_prompt)
+            if not is_valid:
+                print(f"[ERROR] Invalid prompt format in {txt_path}:")
+                print(error_message)
+                print(f"[SKIPPING] {base_name} due to invalid prompt format")
+                continue
 
             # Parse multi-line prompts if enabled
             individual_prompts = parse_multiline_prompts(raw_text_prompt, enable_multiline_prompts)
+            
+            # Validate each individual prompt line if multi-line is enabled
+            if enable_multiline_prompts:
+                for i, prompt_line in enumerate(individual_prompts):
+                    line_valid, line_error = validate_prompt_format(prompt_line)
+                    if not line_valid:
+                        print(f"[ERROR] Invalid prompt format in {txt_path}, line {i+1}:")
+                        print(line_error)
+                        print(f"[SKIPPING] {base_name} due to invalid prompt in line {i+1}")
+                        continue
 
             print(f"\n[PROCESSING] {base_name}")
             if enable_multiline_prompts:
@@ -3885,6 +3990,11 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                             placeholder="Describe your video...",
                             lines=10
                         )
+                        
+                        # Prompt validation section
+                        with gr.Row():
+                            validate_prompt_btn = gr.Button("✅ Validate Prompt Format", size="sm", variant="secondary")
+                            prompt_validation_output = gr.Markdown("", visible=False)
 
                         # Aspect ratio and resolution in reorganized layout
                         with gr.Row():
@@ -4197,20 +4307,32 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                         - **Memory Efficient**: Block swapping and CPU offloading
                         - **Flexible Prompts**: Complex prompts with speech and audio tags
 
-                        ### 📝 Prompt Format
+                        ### 📝 Prompt Format (REQUIRED)
                         Use special tags for precise control:
 
-                        #### Speech Tags
+                        #### ⚠️ IMPORTANT: Validation Rules
+                        **All prompts must follow these rules or generation will fail:**
+                        
+                        1. **Speech Tags (REQUIRED)**: At least one `<S>...<E>` pair must be present
+                        2. **Tag Pairing**: Every `<S>` must have a matching `<E>`
+                        3. **Audio Caption Pairing**: Every `<AUDCAP>` must have a matching `<ENDAUDCAP>`
+                        4. **No Unknown Tags**: Only `<S>`, `<E>`, `<AUDCAP>`, and `<ENDAUDCAP>` are allowed
+                        5. **Proper Order**: Opening tags must come before their closing tags
+
+                        #### Speech Tags (REQUIRED)
                         Wrap dialogue in `<S>` and `<E>` tags:
                         ```
-                        A person says <S>Hello, how are you?</S> while waving
+                        A person says <S>Hello, how are you?<E> while waving
                         ```
 
-                        #### Audio Description Tags
+                        #### Audio Description Tags (OPTIONAL)
                         Add audio details with `<AUDCAP>` and `<ENDAUDCAP>`:
                         ```
-                        <AUDCAP>Clear male voice, enthusiastic tone</AUDCAP>
+                        <AUDCAP>Clear male voice, enthusiastic tone<ENDAUDCAP>
                         ```
+                        
+                        #### ✅ Validation Button
+                        Use the "Validate Prompt Format" button above the prompt box to check your prompt before generating!
 
                         ### 🎨 Supported Aspect Ratios
                         - **16:9**: Landscape (default)
@@ -4700,6 +4822,44 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
         fn=update_cropped_image_only,
         inputs=[original_image_path, auto_crop_image, video_width, video_height, original_image_width, original_image_height],
         outputs=[cropped_display, cropped_resolution_label, image_to_use]
+    )
+
+    # Hook up prompt validation button
+    def handle_prompt_validation(prompt):
+        """Validate prompt format and return user-friendly message."""
+        is_valid, error_message = validate_prompt_format(prompt)
+        
+        if is_valid:
+            success_msg = """### ✅ Prompt Format Valid!
+
+Your prompt follows all required formatting rules:
+- Contains required <S>...<E> speech tags
+- All tags are properly paired
+- No unknown tags detected
+
+You're ready to generate! 🚀"""
+            return gr.update(value=success_msg, visible=True)
+        else:
+            error_display = f"""### ❌ Prompt Format Invalid
+
+{error_message}
+
+---
+
+**Required Format:**
+- Speech tags: `<S>Your dialogue here<E>` (at least one pair required)
+- Audio captions: `<AUDCAP>Audio description here<ENDAUDCAP>` (optional, must be paired)
+
+**Example:**
+```
+A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice, friendly tone<ENDAUDCAP>
+```"""
+            return gr.update(value=error_display, visible=True)
+    
+    validate_prompt_btn.click(
+        fn=handle_prompt_validation,
+        inputs=[video_text_prompt],
+        outputs=[prompt_validation_output]
     )
 
     # Hook up randomize seed
