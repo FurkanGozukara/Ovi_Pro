@@ -3951,7 +3951,7 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height):
 theme = gr.themes.Soft()
 theme.font = ["Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v5.6 : https://www.patreon.com/posts/140393220")
+    gr.Markdown("# Ovi Pro SECourses Premium App v5.7 : https://www.patreon.com/posts/140393220")
 
     image_to_use = gr.State(value=None)
     input_video_state = gr.State(value=None)  # Store input video path for merging
@@ -4830,30 +4830,41 @@ with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
         is_valid, error_message = validate_prompt_format(prompt)
         
         if is_valid:
-            success_msg = """### ✅ Prompt Format Valid!
+            success_msg = """### ✅ Prompt Format Valid
 
-Your prompt follows all required formatting rules:
-- Contains required <S>...<E> speech tags
-- All tags are properly paired
+**Your prompt is ready to use!**
+
+- Contains required speech tags
+- All tags are properly paired  
 - No unknown tags detected
-
-You're ready to generate! 🚀"""
+"""
             return gr.update(value=success_msg, visible=True)
         else:
+            # Convert plain text error message to HTML with proper formatting
+            import html
+            # First escape HTML entities so tags like <S> display as text
+            formatted_error = html.escape(error_message)
+            # Then replace newlines with HTML breaks for display
+            formatted_error = formatted_error.replace('\n\n', '\n\n').replace('\n', '  \n')
+            
             error_display = f"""### ❌ Prompt Format Invalid
 
-{error_message}
+**What's wrong:**
+
+{formatted_error}
 
 ---
 
-**Required Format:**
-- Speech tags: `<S>Your dialogue here<E>` (at least one pair required)
-- Audio captions: `<AUDCAP>Audio description here<ENDAUDCAP>` (optional, must be paired)
+**Required format:**
+
+- **Speech tags (REQUIRED):** `<S>Your dialogue here<E>` - At least one pair required
+- **Audio captions (OPTIONAL):** `<AUDCAP>Audio description<ENDAUDCAP>` - Must be paired if used
 
 **Example:**
 ```
 A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice, friendly tone<ENDAUDCAP>
-```"""
+```
+"""
             return gr.update(value=error_display, visible=True)
     
     validate_prompt_btn.click(
