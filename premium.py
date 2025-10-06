@@ -909,9 +909,9 @@ def generate_video(
 
                 if clear_all:
                     # Run this generation in a subprocess for memory cleanup
-                    # Always pass the original text_prompt so subprocess can handle parsing logic correctly
+                    # Pass individual current_prompt to avoid re-parsing all prompts in subprocess
                     single_gen_params = {
-                        'text_prompt': text_prompt,  # Always pass original text_prompt for proper parsing
+                        'text_prompt': current_prompt,  # Pass individual prompt to avoid re-parsing
                         'image': image_path,
                         'video_frame_height': video_frame_height,
                         'video_frame_width': video_frame_width,
@@ -948,8 +948,8 @@ def generate_video(
                         'base_filename': base_filename,  # Pass base filename for batch processing
                         'output_dir': outputs_dir,  # Pass output directory to subprocess
                         'text_embeddings_cache': text_embeddings_cache,  # Pass pre-encoded embeddings if available
-                        'enable_multiline_prompts': enable_multiline_prompts,  # Use same setting as main process
-                        'enable_video_extension': enable_video_extension,  # Pass through extension setting
+                        'enable_multiline_prompts': False,  # Disable multiline parsing in subprocess (already parsed)
+                        'enable_video_extension': False,  # Disable video extensions in subprocess (handled in main process)
                     }
 
 
