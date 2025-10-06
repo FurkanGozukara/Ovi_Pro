@@ -1689,7 +1689,12 @@ def open_outputs_folder():
     import platform
 
     try:
-        outputs_dir = os.path.join(os.path.dirname(__file__), "outputs")
+        # Use custom output directory if set via --output_dir, otherwise use default
+        if args.output_dir and isinstance(args.output_dir, str):
+            outputs_dir = os.path.abspath(args.output_dir)
+        else:
+            outputs_dir = os.path.join(os.path.dirname(__file__), "outputs")
+
         if not os.path.exists(outputs_dir):
             os.makedirs(outputs_dir, exist_ok=True)
 
