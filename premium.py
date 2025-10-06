@@ -530,6 +530,69 @@ def extract_last_frame(video_path):
         print(f"[VIDEO EXTENSION] Error extracting last frame: {e}")
         return None
 
+def is_video_file(file_path):
+    """Check if a file is a video based on extension."""
+    if not file_path or not isinstance(file_path, str):
+        return False
+    video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.webm', '.m4v']
+    return any(file_path.lower().endswith(ext) for ext in video_extensions)
+
+def is_image_file(file_path):
+    """Check if a file is an image based on extension."""
+    if not file_path or not isinstance(file_path, str):
+        return False
+    image_extensions = ['.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp', '.gif']
+    return any(file_path.lower().endswith(ext) for ext in image_extensions)
+
+def process_input_media(media_path, auto_crop_image, video_width, video_height):
+    """Process input media (image or video) and return image path to use + input video path if applicable.
+    
+    Returns:
+        tuple: (image_path, input_video_path, is_video)
+            - image_path: Path to image to use for generation (extracted frame if video)
+            - input_video_path: Path to input video if provided, None otherwise
+            - is_video: Boolean indicating if input was a video
+    """
+    if not media_path or not os.path.exists(media_path):
+        return None, None, False
+    
+    try:
+        # Check if input is a video
+        if is_video_file(media_path):
+            print(f"[INPUT] Video detected: {media_path}")
+            print(f"[INPUT] Extracting last frame for use as source image...")
+            
+            # Extract last frame from video
+            frame_path = extract_last_frame(media_path)
+            if not frame_path:
+                print(f"[INPUT] Failed to extract frame from video, skipping")
+                return None, None, False
+            
+            print(f"[INPUT] Extracted frame: {frame_path}")
+            print(f"[INPUT] Input video will be merged with generated video after generation")
+            
+            # Apply auto-crop if enabled
+            if auto_crop_image and video_width and video_height:
+                frame_path = apply_auto_crop_if_enabled(frame_path, auto_crop_image, video_width, video_height)
+                print(f"[INPUT] Auto-crop applied to extracted frame")
+            
+            return frame_path, media_path, True
+        
+        # Input is an image
+        elif is_image_file(media_path):
+            print(f"[INPUT] Image detected: {media_path}")
+            return media_path, None, False
+        
+        else:
+            print(f"[INPUT] Unknown file type: {media_path}")
+            return None, None, False
+            
+    except Exception as e:
+        print(f"[INPUT] Error processing input media: {e}")
+        import traceback
+        traceback.print_exc()
+        return None, None, False
+
 def combine_videos(video_paths, output_path):
     """Combine multiple videos into one by concatenating them with FFmpeg."""
     try:
@@ -658,6 +721,7 @@ def generate_video(
     text_embeddings_cache=None,  # Pre-encoded text embeddings from T5 subprocess
     enable_multiline_prompts=False,  # New: Enable multi-line prompt processing
     enable_video_extension=False,  # New: Enable automatic video extension based on prompt lines
+    input_video_path=None,  # New: Input video path for merging (when user uploads video)
 ):
     # Note: enable_video_extension is passed directly from UI and should be respected as-is
 
@@ -1336,6 +1400,34 @@ def generate_video(
         generation_end_time = time.time()
         total_generation_time = generation_end_time - generation_start_time
         print(f"  Total generation time: {total_generation_time:.2f} seconds")
+
+        # If input video was provided, merge it with the generated video
+        if input_video_path and last_output_path and os.path.exists(last_output_path):
+            print("=" * 80)
+            print("INPUT VIDEO MERGING")
+            print(f"  Input video: {input_video_path}")
+            print(f"  Generated video: {last_output_path}")
+            print("=" * 80)
+
+            # Create merged filename
+            base_name = os.path.splitext(os.path.basename(last_output_path))[0]
+            merged_filename = f"{base_name}_merged.mp4"
+            merged_path = os.path.join(outputs_dir, merged_filename)
+
+            # Check for conflicts and increment if needed
+            if os.path.exists(merged_path):
+                counter = 1
+                while os.path.exists(os.path.join(outputs_dir, f"{base_name}_merged_{counter}.mp4")):
+                    counter += 1
+                merged_filename = f"{base_name}_merged_{counter}.mp4"
+                merged_path = os.path.join(outputs_dir, merged_filename)
+
+            # Merge input video + generated video
+            if combine_videos([input_video_path, last_output_path], merged_path):
+                print(f"[INPUT VIDEO MERGE] Merged video saved: {merged_filename}")
+                last_output_path = merged_path
+            else:
+                print("[INPUT VIDEO MERGE] Failed to merge videos, returning generated video only")
 
         # Debug: Log final output path
         print("=" * 80)
@@ -3075,6 +3167,20 @@ def update_cropped_image_only(image_path, auto_crop_image, video_width, video_he
         )
     
     try:
+        # Check if input is a video - extract frame first
+        if is_video_file(image_path):
+            print(f"[UPDATE CROP] Video detected, extracting last frame...")
+            frame_path = extract_last_frame(image_path)
+            if not frame_path:
+                print(f"[UPDATE CROP] Failed to extract frame")
+                return (
+                    gr.update(visible=False, value=None),
+                    gr.update(value="", visible=False),
+                    gr.update(value="", visible=False),
+                    None
+                )
+            image_path = frame_path
+        
         img = Image.open(image_path)
         iw, ih = img.size
         
@@ -3259,49 +3365,87 @@ def update_image_crop_and_labels(image_path, auto_crop_image, video_width, video
             image_path
         )
 
-def on_image_upload(image_path, auto_crop_image, video_width, video_height):
-    """Called when user uploads a new image - auto-detects aspect ratio from image dimensions."""
-    if image_path is None:
+def on_media_upload(media_path, auto_crop_image, video_width, video_height):
+    """Called when user uploads media (image or video) - processes and updates UI."""
+    if media_path is None:
         return (
-            gr.update(visible=False, value=None),
-            gr.update(value="", visible=False),
-            gr.update(value=None),
-            gr.update(value=None),
-            gr.update(),
-            gr.update(),
-            gr.update(value="", visible=False),
-            None
+            gr.update(visible=False, value=None),  # input_preview
+            gr.update(visible=False, value=None),  # cropped_display
+            gr.update(value="", visible=False),    # image_resolution_label
+            gr.update(value=None),                 # aspect_ratio
+            gr.update(value=None),                 # video_width
+            gr.update(),                           # video_height
+            gr.update(),                           # (unused)
+            gr.update(value="", visible=False),    # cropped_resolution_label
+            None,                                  # image_to_use
+            None                                   # input_video_state
         )
 
-    if not os.path.exists(image_path):
+    if not os.path.exists(media_path):
         return (
-            gr.update(visible=False, value=None),
-            gr.update(value="", visible=False),
-            gr.update(),
-            gr.update(),
-            gr.update(),
-            gr.update(),
-            gr.update(value="", visible=False),
-            image_path
+            gr.update(visible=False, value=None),  # input_preview
+            gr.update(visible=False, value=None),  # cropped_display
+            gr.update(value="", visible=False),    # image_resolution_label
+            gr.update(),                           # aspect_ratio
+            gr.update(),                           # video_width
+            gr.update(),                           # video_height
+            gr.update(),                           # (unused)
+            gr.update(value="", visible=False),    # cropped_resolution_label
+            media_path,                            # image_to_use
+            None                                   # input_video_state
         )
 
     try:
-        # Auto-detect aspect ratio from actual image dimensions
+        # Check if input is video or image
+        is_video = is_video_file(media_path)
+        
+        if is_video:
+            # Extract last frame from video
+            print(f"[MEDIA UPLOAD] Video detected, extracting last frame...")
+            frame_path = extract_last_frame(media_path)
+            if not frame_path:
+                print(f"[MEDIA UPLOAD] Failed to extract frame from video")
+                return (
+                    gr.update(visible=False, value=None),  # input_preview
+                    gr.update(visible=False, value=None),  # cropped_display
+                    gr.update(value="**Error:** Failed to extract frame from video", visible=True),
+                    gr.update(),
+                    gr.update(),
+                    gr.update(),
+                    gr.update(),
+                    gr.update(value="", visible=False),
+                    None,
+                    None  # input_video_state
+                )
+            
+            # Use the extracted frame for aspect ratio detection and cropping
+            image_path = frame_path
+            input_res_label = f"**Input Video:** Last frame extracted"
+        else:
+            image_path = media_path
+            input_res_label = ""
+        
+        # Process the image (whether from video or direct upload)
         img = Image.open(image_path)
         iw, ih = img.size
         
-        input_res_label = f"**Input Image Resolution:** {iw}×{ih}px"
+        if is_video:
+            input_res_label = f"**Input Video:** Last frame extracted - {iw}×{ih}px"
+        else:
+            input_res_label = f"**Input Image Resolution:** {iw}×{ih}px"
         
         if ih == 0 or iw == 0:
             return (
-                gr.update(visible=False, value=None),
+                gr.update(visible=True, value=image_path),   # input_preview - show the raw image/frame
+                gr.update(visible=False, value=None),        # cropped_display
                 gr.update(value=input_res_label, visible=True),
                 gr.update(),
                 gr.update(),
                 gr.update(),
                 gr.update(),
                 gr.update(value="", visible=False),
-                image_path
+                image_path,
+                media_path if is_video else None  # input_video_state
             )
         
         # Calculate aspect ratio from IMAGE dimensions (not from video_width/video_height)
@@ -3315,7 +3459,7 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height):
         closest_key = min(ASPECT_RATIOS.keys(), key=lambda k: abs(get_ratio_value(k) - aspect))
         target_w, target_h = ASPECT_RATIOS[closest_key]
         
-        print(f"[AUTO-DETECT] Image {iw}×{ih} (aspect {aspect:.3f}) → Closest ratio: {closest_key} → {target_w}×{target_h}")
+        print(f"[AUTO-DETECT] {'Video frame' if is_video else 'Image'} {iw}×{ih} (aspect {aspect:.3f}) → Closest ratio: {closest_key} → {target_w}×{target_h}")
         
         # Calculate cropped image
         target_aspect = target_w / target_h
@@ -3340,7 +3484,7 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height):
         cropped_path = os.path.join(tmp_dir, f"cropped_{timestamp}.png")
         cropped.save(cropped_path)
         
-        output_res_label = f"**Cropped Image Resolution:** {target_w}×{target_h}px"
+        output_res_label = f"**Cropped {'Frame' if is_video else 'Image'} Resolution:** {target_w}×{target_h}px"
         
         # Format aspect ratio for dropdown
         aspect_display = _format_ratio_choice(closest_key, ASPECT_RATIOS[closest_key])
@@ -3350,37 +3494,51 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height):
         
         if auto_crop_image:
             return (
-                gr.update(visible=True, value=cropped_path),
+                gr.update(visible=True, value=image_path),             # input_preview - show raw image/frame
+                gr.update(visible=True, value=cropped_path),           # cropped_display - show cropped
                 gr.update(value=input_res_label, visible=True),
                 gr.update(value=aspect_display, choices=aspect_choices),  # Update aspect ratio
                 gr.update(value=target_w),  # Update width
                 gr.update(value=target_h),  # Update height
                 gr.update(value=output_res_label, visible=True),
-                cropped_path
+                cropped_path,
+                media_path if is_video else None  # input_video_state
             )
         else:
             return (
-                gr.update(visible=False, value=None),
+                gr.update(visible=True, value=image_path),             # input_preview - show raw image/frame
+                gr.update(visible=False, value=None),                  # cropped_display - hide when no crop
                 gr.update(value=input_res_label, visible=True),
                 gr.update(value=aspect_display, choices=aspect_choices),  # Still update aspect ratio
                 gr.update(value=target_w),  # Still update width
                 gr.update(value=target_h),  # Still update height
                 gr.update(value="", visible=False),
-                image_path
+                image_path,
+                media_path if is_video else None  # input_video_state
             )
     
     except Exception as e:
-        print(f"Error in on_image_upload: {e}")
+        print(f"Error in on_media_upload: {e}")
+        import traceback
+        traceback.print_exc()
         return (
-            gr.update(visible=False, value=None),
+            gr.update(visible=False, value=None),  # input_preview
+            gr.update(visible=False, value=None),  # cropped_display
             gr.update(value="", visible=False),
             gr.update(),
             gr.update(),
             gr.update(),
             gr.update(),
             gr.update(value="", visible=False),
-            image_path
+            media_path,
+            None  # input_video_state
         )
+
+def on_image_upload(image_path, auto_crop_image, video_width, video_height):
+    """Legacy function - redirects to on_media_upload for compatibility."""
+    result = on_media_upload(image_path, auto_crop_image, video_width, video_height)
+    # Return all values except the last one (input_video_state) for backward compatibility
+    return result[:-1]
 
 theme = gr.themes.Soft()
 theme.font = [gr.themes.GoogleFont("Inter"), "Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
@@ -3388,13 +3546,26 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
     gr.Markdown("# Ovi Pro SECourses Premium App v4.9 : https://www.patreon.com/posts/140393220")
 
     image_to_use = gr.State(value=None)
+    input_video_state = gr.State(value=None)  # Store input video path for merging
 
     with gr.Tabs():
         with gr.TabItem("Generate"):
             with gr.Row():
                 with gr.Column():
-                    # Image section
-                    image = gr.Image(type="filepath", label="First Frame Image (upload or generate)", height=512)
+                    # Image/Video section - now accepts both
+                    gr.Markdown("""
+                    **📥 Input Media:** Upload an image or video as your starting point
+                    - **Image:** Used as first frame for generation
+                    - **Video:** Last frame automatically extracted and used + input video merged with generated video
+                    """)
+                    image = gr.File(
+                        type="filepath",
+                        label="Upload Image or Video",
+                        file_types=["image", "video"],
+                        file_count="single"
+                    )
+                    # Preview of uploaded media (shows original image or extracted frame)
+                    input_preview = gr.Image(label="Input Preview", visible=False, height=512, show_label=True)
                     image_resolution_label = gr.Markdown("", visible=False)
 
                     # Generate Video button right under image upload
@@ -3600,9 +3771,9 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                                 info="Each line in the prompt becomes a separate generation (lines < 4 chars are skipped)"
                             )
                             enable_video_extension = gr.Checkbox(
-                                label="Enable Video Extension",
+                                label="Enable Video Extension (Last Frame Based)",
                                 value=False,
-                                info="Automatically extend video using each line in prompt as extension (lines < 3 chars skipped)"
+                                info="Automatically extend video using each line in prompt as extension (lines < 3 chars skipped). 4 Lines = 1 base + 3 times extension 20 seconds video. Uses last frame."
                             )
 
                         # Negative prompts in same row, 3 lines each
@@ -3625,7 +3796,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                     with gr.Row():
                         open_outputs_btn = gr.Button("📁 Open Outputs Folder")
                         cancel_btn = gr.Button("❌ Cancel All", variant="stop")
-                    cropped_display = gr.Image(label="Cropped First Frame", visible=False, height=512)
+                    cropped_display = gr.Image(label="Source Frame Preview (Auto-cropped)", visible=False, height=512)
                     cropped_resolution_label = gr.Markdown("", visible=False)
 
                     # Preset Save/Load Section
@@ -4148,8 +4319,8 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                         with gr.Column(scale=1):
                             load_btn = gr.Button(f"Load Example {i+1}", size="sm")
                             load_btn.click(
-                                fn=lambda prompt=example: (prompt, None),
-                                outputs=[video_text_prompt, image]
+                                fn=lambda prompt=example: (prompt, None, None),
+                                outputs=[video_text_prompt, image, image_to_use]
                             )
 
             with gr.TabItem("Image-to-Video Examples"):
@@ -4185,7 +4356,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
         outputs=[aspect_ratio, video_width, video_height],
     ).then(
         fn=update_cropped_image_only,
-        inputs=[image, auto_crop_image, video_width, video_height],
+        inputs=[image_to_use, auto_crop_image, video_width, video_height],
         outputs=[cropped_display, image_resolution_label, cropped_resolution_label, image_to_use]
     )
 
@@ -4195,7 +4366,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
         outputs=[aspect_ratio, video_width, video_height],
     ).then(
         fn=update_cropped_image_only,
-        inputs=[image, auto_crop_image, video_width, video_height],
+        inputs=[image_to_use, auto_crop_image, video_width, video_height],
         outputs=[cropped_display, image_resolution_label, cropped_resolution_label, image_to_use]
     )
 
@@ -4206,7 +4377,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
         outputs=[video_width, video_height],
     ).then(
         fn=update_cropped_image_only,
-        inputs=[image, auto_crop_image, video_width, video_height],
+        inputs=[image_to_use, auto_crop_image, video_width, video_height],
         outputs=[cropped_display, image_resolution_label, cropped_resolution_label, image_to_use]
     )
 
@@ -4230,7 +4401,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
     run_btn.click(
         fn=generate_video,
         inputs=[
-            video_text_prompt, image, video_height, video_width, video_seed, solver_name,
+            video_text_prompt, image_to_use, video_height, video_width, video_seed, solver_name,
             sample_steps, shift, video_guidance_scale, audio_guidance_scale,
             slg_layer, blocks_to_swap, video_negative_prompt, audio_negative_prompt,
             gr.Checkbox(value=False, visible=False), cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model,
@@ -4240,32 +4411,33 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             base_resolution_width, base_resolution_height, duration_seconds, auto_crop_image,
             gr.Textbox(value=None, visible=False), gr.Textbox(value=None, visible=False), gr.Textbox(value=None, visible=False),
             enable_multiline_prompts, enable_video_extension,
+            input_video_state,  # Pass input video path for merging
         ],
         outputs=[output_path],
     )
 
     image.change(
-        fn=on_image_upload,
+        fn=on_media_upload,
         inputs=[image, auto_crop_image, video_width, video_height],
-        outputs=[cropped_display, image_resolution_label, aspect_ratio, video_width, video_height, cropped_resolution_label, image_to_use]
+        outputs=[input_preview, cropped_display, image_resolution_label, aspect_ratio, video_width, video_height, cropped_resolution_label, image_to_use, input_video_state]
     )
 
     auto_crop_image.change(
-        fn=on_image_upload,
+        fn=on_media_upload,
         inputs=[image, auto_crop_image, video_width, video_height],
-        outputs=[cropped_display, image_resolution_label, aspect_ratio, video_width, video_height, cropped_resolution_label, image_to_use]
+        outputs=[input_preview, cropped_display, image_resolution_label, aspect_ratio, video_width, video_height, cropped_resolution_label, image_to_use, input_video_state]
     )
 
     # Auto-update cropped image when video width/height changes manually
     video_width.change(
         fn=update_cropped_image_only,
-        inputs=[image, auto_crop_image, video_width, video_height],
+        inputs=[image_to_use, auto_crop_image, video_width, video_height],
         outputs=[cropped_display, image_resolution_label, cropped_resolution_label, image_to_use]
     )
 
     video_height.change(
         fn=update_cropped_image_only,
-        inputs=[image, auto_crop_image, video_width, video_height],
+        inputs=[image_to_use, auto_crop_image, video_width, video_height],
         outputs=[cropped_display, image_resolution_label, cropped_resolution_label, image_to_use]
     )
 
@@ -4283,7 +4455,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
         outputs=[]
     )
 
-    # Hook up batch processing button
+    # Hook up batch processing button (batch processing handles its own image paths from folder)
     batch_btn.click(
         fn=process_batch_generation,
         inputs=[
