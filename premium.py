@@ -952,6 +952,9 @@ def generate_video(
     dont_auto_combine_video_input=False,  # New: Don't auto combine video input with generated video
     input_video_path=None,  # New: Input video path for merging (when user uploads video)
     is_video_extension_subprocess=False,  # Internal: Mark subprocess calls for video extensions
+    is_extension=False,  # Internal: Mark if this generation is an extension
+    extension_index=0,  # Internal: Extension number for metadata
+    main_base=None,  # Internal: Main video base name for consistent naming
 ):
     # Note: enable_video_extension is passed directly from UI and should be respected as-is
 
@@ -1371,47 +1374,24 @@ def generate_video(
                     save_used_source_image(image_path, outputs_dir, output_filename)
 
                     # Save metadata if enabled
-                    # Skip metadata saving for extension subprocesses
-                    is_extension_subprocess = locals().get('is_video_extension_subprocess', False)
-                    if save_metadata and not is_extension_subprocess:
+                    if save_metadata:
                         # For video extension, use full multi-line prompt for first/main video metadata
                         metadata_prompt = current_prompt
                         if enable_video_extension and video_extension_count > 0 and prompt_idx == 0:
                             metadata_prompt = text_prompt  # Use full multi-line prompt for main video
 
-                        generation_params = {
-                            'text_prompt': metadata_prompt,  # Use appropriate prompt for metadata
-                            'image_path': image_path,
-                            'video_frame_height': video_frame_height,
-                            'video_frame_width': video_frame_width,
-                            'aspect_ratio': aspect_ratio,
-                            'randomize_seed': randomize_seed,
-                            'num_generations': num_generations,
-                            'solver_name': solver_name,
-                            'sample_steps': sample_steps,
-                            'shift': shift,
-                            'video_guidance_scale': video_guidance_scale,
-                            'audio_guidance_scale': audio_guidance_scale,
-                            'slg_layer': slg_layer,
-                            'blocks_to_swap': blocks_to_swap,
-                            'cpu_offload': cpu_offload,
-                            'delete_text_encoder': delete_text_encoder,
-                            'fp8_t5': fp8_t5,
-                            'cpu_only_t5': cpu_only_t5,
-                            'fp8_base_model': fp8_base_model,
-                            'no_audio': no_audio,
-                            'no_block_prep': no_block_prep,
-                            'clear_all': clear_all,
-                            'vae_tiled_decode': vae_tiled_decode,
-                            'vae_tile_size': vae_tile_size,
-                            'vae_tile_overlap': vae_tile_overlap,
-                            'base_resolution_width': base_resolution_width,
-                            'base_resolution_height': base_resolution_height,
-                            'duration_seconds': duration_seconds,
-                            'video_negative_prompt': video_negative_prompt,
-                            'audio_negative_prompt': audio_negative_prompt,
-                            'is_batch': False
-                        }
+                        generation_params = build_generation_metadata_params(
+                            metadata_prompt, image_path, video_frame_height, video_frame_width,
+                            aspect_ratio, base_resolution_width, base_resolution_height, duration_seconds,
+                            randomize_seed, num_generations, solver_name, sample_steps, shift,
+                            video_guidance_scale, audio_guidance_scale, slg_layer, blocks_to_swap,
+                            cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model,
+                            use_sage_attention, no_audio, no_block_prep, clear_all, vae_tiled_decode,
+                            vae_tile_size, vae_tile_overlap, video_negative_prompt, audio_negative_prompt,
+                            is_extension=is_extension,
+                            extension_index=extension_index,
+                            is_batch=False
+                        )
                         save_generation_metadata(output_path, generation_params, current_seed)
 
                     print(f"[GENERATION {gen_idx + 1}/{int(num_generations)}] Saved to: {output_path}")
@@ -1455,6 +1435,9 @@ def generate_video(
                                 ext_output_path = os.path.join(outputs_dir, ext_filename)
 
                             if clear_all:
+                                # Ensure main_base is available for subprocess
+                                current_main_base = os.path.splitext(os.path.basename(output_path))[0]
+
                                 # Run extension in subprocess
                                 ext_params = {
                                     'text_prompt': extension_prompt,
@@ -1482,7 +1465,7 @@ def generate_video(
                                     'no_block_prep': no_block_prep,
                                     'num_generations': 1,
                                     'randomize_seed': False,
-                                    'save_metadata': False,  # Extensions don't save individual metadata
+                                    'save_metadata': save_metadata,  # Save metadata for extensions
                                     'aspect_ratio': aspect_ratio,
                                     'clear_all': False,
                                     'vae_tiled_decode': vae_tiled_decode,
@@ -1492,37 +1475,30 @@ def generate_video(
                                     'base_resolution_height': base_resolution_height,
                                     'duration_seconds': duration_seconds,
                                     'auto_crop_image': False,  # Image already processed
-                                    'base_filename': base_filename,
+                                    'base_filename': f"{current_main_base}_ext{ext_idx + 1}",
                                     'output_dir': outputs_dir,
                                     'text_embeddings_cache': text_embeddings_cache,
                                     'enable_multiline_prompts': False,
                                     'enable_video_extension': False,
                                     'is_video_extension_subprocess': True,  # Mark as extension subprocess
+                                    'is_extension': True,  # Mark for metadata that this is an extension
+                                    'extension_index': ext_idx + 1,  # Extension number for metadata
+                                    'main_base': current_main_base,  # Pass main base name for consistent naming
                                 }
 
                                 run_generation_subprocess(ext_params)
 
-                                # Find the generated extension file and rename it
-                                import glob
+                                # The subprocess should have generated the file with the correct name
+                                # Just verify it exists
                                 import time
-                                pattern = os.path.join(outputs_dir, "*.mp4")
-
-                                # Retry a few times in case of timing issues
                                 generated_file = None
-                                for retry in range(5):  # Try up to 5 times
-                                    existing_files = glob.glob(pattern)
-                                    if existing_files:
-                                        # Filter files that are at least 1 second old to avoid partially written files
-                                        current_time = time.time()
-                                        valid_files = [f for f in existing_files if (current_time - os.path.getctime(f)) > 1.0]
-                                        if valid_files:
-                                            generated_file = max(valid_files, key=os.path.getctime)
-                                            break
+                                for retry in range(10):  # Try up to 10 times
+                                    if os.path.exists(ext_output_path):
+                                        generated_file = ext_output_path
+                                        break
                                     time.sleep(0.5)  # Wait 0.5 seconds between retries
 
                                 if generated_file:
-                                    # Rename to desired extension filename
-                                    os.rename(generated_file, ext_output_path)
                                     extension_videos.append(ext_output_path)
                                     print(f"[VIDEO EXTENSION] Extension {ext_idx + 1} saved: {ext_filename}")
                                     current_image_path = extract_last_frame(ext_output_path)  # Extract for next extension
@@ -1579,14 +1555,24 @@ def generate_video(
 
                                 save_video(ext_output_path, ext_generated_video, ext_generated_audio, fps=24, sample_rate=16000)
                                 extension_videos.append(ext_output_path)
-                                print(f"[VIDEO EXTENSION] Extension {ext_idx + 1} saved: {ext_filename}")
+
+                                # Save metadata for extension
+                                ext_generation_params = build_generation_metadata_params(
+                                    extension_prompt, current_image_path, video_frame_height, video_frame_width,
+                                    aspect_ratio, base_resolution_width, base_resolution_height, duration_seconds,
+                                    randomize_seed, num_generations, solver_name, sample_steps, shift,
+                                    video_guidance_scale, audio_guidance_scale, slg_layer, None,  # blocks_to_swap=None for extensions
+                                    cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model,
+                                    use_sage_attention, no_audio, no_block_prep, clear_all, vae_tiled_decode,
+                                    vae_tile_size, vae_tile_overlap, video_negative_prompt, audio_negative_prompt,
+                                    is_extension=True, extension_index=ext_idx + 1, is_batch=False
+                                )
+                                save_generation_metadata(ext_output_path, ext_generation_params, current_seed)
 
                                 # Save used source image for extension
                                 save_used_source_image(current_image_path, outputs_dir, ext_filename)
 
                                 current_image_path = extract_last_frame(ext_output_path)  # Extract for next extension
-
-                                # Note: Extensions don't save individual metadata - only main video has metadata
 
                                 print(f"[VIDEO EXTENSION] Extension {ext_idx + 1} saved: {ext_filename}")
 
@@ -2792,6 +2778,52 @@ def initialize_app():
     """Initialize app with preset dropdown choices."""
     presets = get_available_presets()
     return gr.update(choices=presets, value=None)
+
+def build_generation_metadata_params(text_prompt, image_path, video_frame_height, video_frame_width,
+                                   aspect_ratio, base_resolution_width, base_resolution_height, duration_seconds,
+                                   randomize_seed, num_generations, solver_name, sample_steps, shift,
+                                   video_guidance_scale, audio_guidance_scale, slg_layer, blocks_to_swap,
+                                   cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model,
+                                   use_sage_attention, no_audio, no_block_prep, clear_all, vae_tiled_decode,
+                                   vae_tile_size, vae_tile_overlap, video_negative_prompt, audio_negative_prompt,
+                                   is_extension=False, extension_index=0, is_batch=False):
+    """Build metadata parameters dictionary to avoid code duplication."""
+    return {
+        'text_prompt': text_prompt,
+        'image_path': image_path,
+        'video_frame_height': video_frame_height,
+        'video_frame_width': video_frame_width,
+        'aspect_ratio': aspect_ratio,
+        'base_resolution_width': base_resolution_width,
+        'base_resolution_height': base_resolution_height,
+        'duration_seconds': duration_seconds,
+        'randomize_seed': randomize_seed,
+        'num_generations': num_generations,
+        'solver_name': solver_name,
+        'sample_steps': sample_steps,
+        'shift': shift,
+        'video_guidance_scale': video_guidance_scale,
+        'audio_guidance_scale': audio_guidance_scale,
+        'slg_layer': slg_layer,
+        'blocks_to_swap': blocks_to_swap,
+        'cpu_offload': cpu_offload,
+        'delete_text_encoder': delete_text_encoder,
+        'fp8_t5': fp8_t5,
+        'cpu_only_t5': cpu_only_t5,
+        'fp8_base_model': fp8_base_model,
+        'use_sage_attention': use_sage_attention,
+        'no_audio': no_audio,
+        'no_block_prep': no_block_prep,
+        'clear_all': clear_all,
+        'vae_tiled_decode': vae_tiled_decode,
+        'vae_tile_size': vae_tile_size,
+        'vae_tile_overlap': vae_tile_overlap,
+        'video_negative_prompt': video_negative_prompt,
+        'audio_negative_prompt': audio_negative_prompt,
+        'is_extension': is_extension,
+        'extension_index': extension_index,
+        'is_batch': is_batch
+    }
 
 def save_generation_metadata(output_path, generation_params, used_seed):
     """Save generation metadata as a .txt file alongside the video."""
