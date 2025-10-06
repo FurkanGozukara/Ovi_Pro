@@ -593,94 +593,143 @@ def process_input_media(media_path, auto_crop_image, video_width, video_height):
         traceback.print_exc()
         return None, None, False
 
-def trim_last_frame_from_video(input_video_path, output_video_path):
-    """Remove the last frame from a video using FFmpeg.
-    
+def trim_video_frames(input_video_path, output_video_path, trim_first=False, trim_last=False):
+    """Trim frames from a video using FFmpeg.
+
+    Args:
+        input_video_path: Path to input video
+        output_video_path: Path to output video
+        trim_first: If True, removes the first frame
+        trim_last: If True, removes the last frame
+
     Returns:
         bool: True if successful, False otherwise
     """
     try:
         import subprocess
         import cv2
-        
+
         # Get video properties
         cap = cv2.VideoCapture(input_video_path)
         if not cap.isOpened():
             print(f"[TRIM] Could not open video: {input_video_path}")
             return False
-        
+
         fps = cap.get(cv2.CAP_PROP_FPS)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         cap.release()
-        
+
         if total_frames <= 1:
             print(f"[TRIM] Video has only {total_frames} frame(s), cannot trim")
             return False
-        
-        # Calculate frames to keep (remove last frame)
-        frames_to_keep = total_frames - 1
 
-        print(f"[TRIM] Original video: {total_frames} frames at {fps:.2f} fps")
-        print(f"[TRIM] Trimming to: {frames_to_keep} frames")
+        trim_type = "first" if trim_first else "last"
+        print(f"[TRIM-{trim_type.upper()}] Original video: {total_frames} frames at {fps:.2f} fps")
 
-        # Use FFmpeg to trim the video by specifying exact frame count for frame accuracy
-        # Note: We re-encode to ensure exact frame trimming (can't rely on keyframes with -c copy)
-        cmd = [
-            'ffmpeg', '-y',
-            '-i', input_video_path,
-            '-frames:v', str(frames_to_keep),  # Keep exactly this many frames
-            '-c:v', 'libx264',  # Re-encode video for frame-accurate trim
-            '-preset', 'slow',  # Fast encoding preset
-            '-crf', '12',  # High quality (18 is visually lossless)
-            '-c:a', 'aac',  # Re-encode audio
-            '-b:a', '192k',  # Audio bitrate
-            '-avoid_negative_ts', 'make_zero',
-            output_video_path
-        ]
-        
+        if trim_last:
+            # Calculate frames to keep (remove last frame)
+            frames_to_keep = total_frames - 1
+            print(f"[TRIM] Trimming to: {frames_to_keep} frames")
+
+            # Use FFmpeg to trim the video by specifying exact frame count for frame accuracy
+            cmd = [
+                'ffmpeg', '-y',
+                '-i', input_video_path,
+                '-frames:v', str(frames_to_keep),  # Keep exactly this many frames
+                '-c:v', 'libx264',  # Re-encode video for frame-accurate trim
+                '-preset', 'slow',  # Fast encoding preset
+                '-crf', '12',  # High quality (18 is visually lossless)
+                '-c:a', 'aac',  # Re-encode audio
+                '-b:a', '192k',  # Audio bitrate
+                '-avoid_negative_ts', 'make_zero',
+                output_video_path
+            ]
+
+            expected_frames = frames_to_keep
+
+        elif trim_first:
+            # Skip first frame and keep the rest
+            print(f"[TRIM-FIRST] Skipping first frame, keeping {total_frames - 1} frames")
+
+            # Use FFmpeg to skip the first frame by starting from frame 1 (0-indexed)
+            cmd = [
+                'ffmpeg', '-y',
+                '-i', input_video_path,
+                '-vf', 'select=not(eq(n\\,0))',  # Skip frame 0 (first frame)
+                '-af', 'aselect=not(eq(n\\,0))',  # Skip first audio frame too
+                '-c:v', 'libx264',  # Re-encode video
+                '-preset', 'slow',  # Fast encoding preset
+                '-crf', '12',  # High quality (18 is visually lossless)
+                '-c:a', 'aac',  # Re-encode audio
+                '-b:a', '192k',  # Audio bitrate
+                '-avoid_negative_ts', 'make_zero',
+                output_video_path
+            ]
+
+            expected_frames = total_frames - 1
+
         result = subprocess.run(cmd, capture_output=True, text=True)
-        
+
         if result.returncode == 0:
             # Verify the trim worked by checking frame count
             cap_verify = cv2.VideoCapture(output_video_path)
             if cap_verify.isOpened():
                 new_frame_count = int(cap_verify.get(cv2.CAP_PROP_FRAME_COUNT))
                 cap_verify.release()
-                print(f"[TRIM] Successfully trimmed: {total_frames} → {new_frame_count} frames")
-                
-                if new_frame_count == frames_to_keep:
-                    print(f"[TRIM] ✓ Frame count verified: exactly 1 frame removed")
+                print(f"[TRIM-{trim_type.upper()}] Successfully trimmed: {total_frames} → {new_frame_count} frames")
+
+                if new_frame_count == expected_frames:
+                    print(f"[TRIM-{trim_type.upper()}] ✓ Frame count verified: exactly 1 frame removed")
                     return True
                 else:
-                    print(f"[TRIM] ⚠ Warning: Expected {frames_to_keep} frames, got {new_frame_count}")
+                    print(f"[TRIM-{trim_type.upper()}] ⚠ Warning: Expected {expected_frames} frames, got {new_frame_count}")
                     # Still return True as trim succeeded, just with a warning
                     return True
             else:
-                print(f"[TRIM] Successfully trimmed last frame (verification failed)")
+                print(f"[TRIM-{trim_type.upper()}] Successfully trimmed {trim_type} frame (verification failed)")
                 return True
         else:
-            print(f"[TRIM] FFmpeg failed with return code {result.returncode}")
-            print(f"[TRIM] stderr: {result.stderr}")
+            print(f"[TRIM-{trim_type.upper()}] FFmpeg failed with return code {result.returncode}")
+            print(f"[TRIM-{trim_type.upper()}] stderr: {result.stderr}")
             return False
-            
+
     except Exception as e:
-        print(f"[TRIM] Error trimming video: {e}")
+        print(f"[TRIM-{trim_type.upper()}] Error trimming video: {e}")
         import traceback
         traceback.print_exc()
         return False
 
-def combine_videos(video_paths, output_path, trim_first_video_last_frame=False):
+def trim_last_frame_from_video(input_video_path, output_video_path):
+    """Remove the last frame from a video using FFmpeg.
+
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    return trim_video_frames(input_video_path, output_video_path, trim_first=False, trim_last=True)
+
+def trim_first_frame_from_video(input_video_path, output_video_path):
+    """Remove the first frame from a video using FFmpeg.
+
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    return trim_video_frames(input_video_path, output_video_path, trim_first=True, trim_last=False)
+
+def combine_videos(video_paths, output_path, trim_first_video_last_frame=False, trim_extension_first_frames=False):
     """Combine multiple videos into one by concatenating them with FFmpeg.
-    
+
     Args:
         video_paths: List of video file paths to combine
         output_path: Output path for combined video
         trim_first_video_last_frame: If True, removes last frame from first video before merging
+        trim_extension_first_frames: If True, removes first frame from each video except the first
     """
     try:
         import subprocess
         import tempfile
         import os
+
+        temp_trimmed_extensions = []
 
         if len(video_paths) < 2:
             print("[VIDEO EXTENSION] Only one video, no combination needed")
@@ -691,14 +740,31 @@ def combine_videos(video_paths, output_path, trim_first_video_last_frame=False):
         if trim_first_video_last_frame:
             print(f"[VIDEO MERGE] Trimming last frame from first video to avoid duplication...")
             temp_trimmed_video = tempfile.mktemp(suffix='_trimmed.mp4', dir=os.path.dirname(video_paths[0]))
-            
-            if trim_last_frame_from_video(video_paths[0], temp_trimmed_video):
+
+            if trim_video_frames(video_paths[0], temp_trimmed_video, trim_first=False, trim_last=True):
                 # Replace first video with trimmed version
                 video_paths = [temp_trimmed_video] + video_paths[1:]
                 print(f"[VIDEO MERGE] Using trimmed video (last frame removed)")
             else:
                 print(f"[VIDEO MERGE] Failed to trim, using original video")
                 temp_trimmed_video = None
+
+        # If trimming first frame from extension videos, create trimmed versions
+        if trim_extension_first_frames and len(video_paths) > 1:
+            print(f"[VIDEO MERGE] Trimming first frame from {len(video_paths) - 1} extension videos to avoid duplication...")
+            new_video_paths = [video_paths[0]]  # Keep first video as-is
+
+            for i, video_path in enumerate(video_paths[1:], 1):  # Skip first video
+                trimmed_path = tempfile.mktemp(suffix=f'_ext{i}_trimmed.mp4', dir=os.path.dirname(video_path))
+                if trim_video_frames(video_path, trimmed_path, trim_first=True, trim_last=False):
+                    new_video_paths.append(trimmed_path)
+                    temp_trimmed_extensions.append(trimmed_path)
+                    print(f"[VIDEO MERGE] Extension {i} trimmed (first frame removed)")
+                else:
+                    print(f"[VIDEO MERGE] Failed to trim extension {i}, using original")
+                    new_video_paths.append(video_path)
+
+            video_paths = new_video_paths
 
         # Create a temporary file list for FFmpeg concat
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
@@ -736,6 +802,10 @@ def combine_videos(video_paths, output_path, trim_first_video_last_frame=False):
                 os.unlink(concat_file)
                 if temp_trimmed_video and os.path.exists(temp_trimmed_video):
                     os.unlink(temp_trimmed_video)
+                # Clean up temporary trimmed extension files
+                for temp_file in temp_trimmed_extensions:
+                    if os.path.exists(temp_file):
+                        os.unlink(temp_file)
             except:
                 pass
 
@@ -1370,8 +1440,8 @@ def generate_video(
                                     # Rename to desired extension filename
                                     os.rename(generated_file, ext_output_path)
                                     extension_videos.append(ext_output_path)
-                                    current_image_path = extract_last_frame(ext_output_path)  # Extract for next extension
                                     print(f"[VIDEO EXTENSION] Extension {ext_idx + 1} saved: {ext_filename}")
+                                    current_image_path = extract_last_frame(ext_output_path)  # Extract for next extension
                                 else:
                                     print(f"[VIDEO EXTENSION] Warning: Extension {ext_idx + 1} file not found after retries")
                                     break
@@ -1425,6 +1495,7 @@ def generate_video(
 
                                 save_video(ext_output_path, ext_generated_video, ext_generated_audio, fps=24, sample_rate=16000)
                                 extension_videos.append(ext_output_path)
+                                print(f"[VIDEO EXTENSION] Extension {ext_idx + 1} saved: {ext_filename}")
 
                                 # Save used source image for extension
                                 save_used_source_image(current_image_path, outputs_dir, ext_filename)
@@ -1486,7 +1557,7 @@ def generate_video(
                                 final_filename = f"{main_base}_final_{counter}.mp4"
                                 final_path = os.path.join(outputs_dir, final_filename)
 
-                            if combine_videos(extension_videos, final_path):
+                            if combine_videos(extension_videos, final_path, trim_extension_first_frames=True):
                                 print(f"[VIDEO EXTENSION] Combined video saved: {final_filename}")
                                 last_output_path = final_path
                             else:
@@ -3866,12 +3937,12 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                             enable_multiline_prompts = gr.Checkbox(
                                 label="Enable Multi-line Prompts",
                                 value=False,
-                                info="Each line in the prompt becomes a separate generation (lines < 4 chars are skipped)"
+                                info="Each line in the prompt becomes a separate new unique generation (lines < 4 chars are skipped). This is different than Video Extension, don't enable both at the same time."
                             )
                             enable_video_extension = gr.Checkbox(
                                 label="Enable Video Extension (Last Frame Based)",
                                 value=False,
-                                info="Automatically extend video using each line in prompt as extension (lines < 3 chars skipped). 4 Lines = 1 base + 3 times extension 20 seconds video. Uses last frame."
+                                info="Automatically extend last generated video using each line in prompt as extension (lines < 3 chars skipped). 4 Lines Prompt = 1 base + 3 times extension 20 seconds video. Uses last frame."
                             )
 
                         # Negative prompts in same row, 3 lines each
