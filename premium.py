@@ -1616,7 +1616,7 @@ def generate_video(
                                     'auto_crop_image': False,  # Image already processed
                                     'base_filename': f"{current_main_base}_ext{ext_idx + 1}",
                                     'output_dir': outputs_dir,
-                                    'text_embeddings_cache': text_embeddings_cache,
+                                    'text_embeddings_cache': None,  # Extensions must encode their own T5 embeddings
                                     'enable_multiline_prompts': False,
                                     'enable_video_extension': False,
                                     'is_video_extension_subprocess': True,  # Mark as extension subprocess
@@ -4015,7 +4015,7 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height):
 theme = gr.themes.Soft()
 theme.font = ["Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v5.8 : https://www.patreon.com/posts/140393220")
+    gr.Markdown("# Ovi Pro SECourses Premium App v5.9 : https://www.patreon.com/posts/140393220")
 
     image_to_use = gr.State(value=None)
     input_video_state = gr.State(value=None)  # Store input video path for merging
