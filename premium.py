@@ -544,6 +544,59 @@ def is_image_file(file_path):
     image_extensions = ['.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp', '.gif']
     return any(file_path.lower().endswith(ext) for ext in image_extensions)
 
+def convert_image_to_png(image_path, output_dir=None):
+    """
+    Convert any image format (including WebP) to PNG for maximum robustness.
+    
+    Args:
+        image_path: Path to input image (any format supported by PIL)
+        output_dir: Optional output directory. If None, uses same directory as input.
+    
+    Returns:
+        str: Path to converted PNG image, or original path if conversion fails
+    """
+    if not image_path or not os.path.exists(image_path):
+        return image_path
+    
+    # If already PNG, return as-is
+    if image_path.lower().endswith('.png'):
+        return image_path
+    
+    try:
+        # Open image with PIL
+        img = Image.open(image_path)
+        
+        # Convert RGBA to RGB if necessary (for formats with transparency)
+        if img.mode in ('RGBA', 'LA', 'P'):
+            # Create white background
+            background = Image.new('RGB', img.size, (255, 255, 255))
+            if img.mode == 'P':
+                img = img.convert('RGBA')
+            background.paste(img, mask=img.split()[-1] if img.mode in ('RGBA', 'LA') else None)
+            img = background
+        elif img.mode not in ('RGB', 'L'):
+            # Convert any other mode to RGB
+            img = img.convert('RGB')
+        
+        # Determine output path
+        base_name = os.path.splitext(os.path.basename(image_path))[0]
+        if output_dir is None:
+            output_dir = os.path.dirname(image_path)
+        output_path = os.path.join(output_dir, f"{base_name}_converted.png")
+        
+        # Save as PNG with maximum quality
+        img.save(output_path, 'PNG', compress_level=1)  # compress_level=1 for speed with good quality
+        
+        print(f"[IMAGE CONVERSION] Converted {os.path.basename(image_path)} to PNG: {output_path}")
+        return output_path
+        
+    except Exception as e:
+        print(f"[IMAGE CONVERSION] Warning: Failed to convert {image_path} to PNG: {e}")
+        print(f"[IMAGE CONVERSION] Using original image file")
+        import traceback
+        traceback.print_exc()
+        return image_path
+
 def process_input_media(media_path, auto_crop_image, video_width, video_height):
     """Process input media (image or video) and return image path to use + input video path if applicable.
     
@@ -569,6 +622,10 @@ def process_input_media(media_path, auto_crop_image, video_width, video_height):
                 return None, None, False
             
             print(f"[INPUT] Extracted frame: {frame_path}")
+            
+            # Convert frame to PNG for maximum robustness
+            frame_path = convert_image_to_png(frame_path)
+            
             print(f"[INPUT] Input video will be merged with generated video after generation")
             
             # Apply auto-crop if enabled
@@ -581,7 +638,9 @@ def process_input_media(media_path, auto_crop_image, video_width, video_height):
         # Input is an image
         elif is_image_file(media_path):
             print(f"[INPUT] Image detected: {media_path}")
-            return media_path, None, False
+            # Convert to PNG for maximum robustness
+            png_path = convert_image_to_png(media_path)
+            return png_path, None, False
         
         else:
             print(f"[INPUT] Unknown file type: {media_path}")
@@ -1072,13 +1131,16 @@ def generate_video(
         # OPTIMIZATION: If clear_all + delete_text_encoder, run T5 encoding in subprocess FIRST
         # This encodes text before any other models load, ensuring no duplication
         # Only run T5 subprocess if embeddings weren't already provided (from file)
-        if clear_all and delete_text_encoder and text_embeddings_cache is None:
+        #
+        # CRITICAL FIX: Skip T5 pre-encoding when video extensions are enabled
+        # because each extension needs its own prompt-specific embeddings
+        if clear_all and delete_text_encoder and text_embeddings_cache is None and not enable_video_extension:
             print("=" * 80)
             print("T5 SUBPROCESS MODE (CLEAR ALL MEMORY)")
             print("Running T5 encoding in subprocess BEFORE generation subprocess")
             print("This ensures T5 never coexists with other models in memory")
             print("=" * 80)
-            
+
             try:
                 # Run T5 encoding in subprocess - only T5 + tokenizer will be loaded
                 text_embeddings_cache = run_t5_encoding_subprocess(
@@ -1088,7 +1150,7 @@ def generate_video(
                     fp8_t5=fp8_t5,
                     cpu_only_t5=cpu_only_t5
                 )
-                
+
                 print("=" * 80)
                 print("T5 SUBPROCESS COMPLETED")
                 print("Text embeddings cached - will be passed to generation subprocess")
@@ -1167,7 +1229,7 @@ def generate_video(
                         'audio_negative_prompt': audio_negative_prompt,
                         'use_image_gen': False,  # Not used in single gen mode
                         'cpu_offload': cpu_offload,
-                        'delete_text_encoder': delete_text_encoder if text_embeddings_cache is None else False,  # Skip T5 if already encoded
+                                'delete_text_encoder': delete_text_encoder,  # Always allow T5 encoding in extension subprocess (no cached embeddings for extensions)
                         'fp8_t5': fp8_t5,
                         'cpu_only_t5': cpu_only_t5,
                         'fp8_base_model': fp8_base_model,
@@ -1188,7 +1250,7 @@ def generate_video(
                         'auto_crop_image': auto_crop_image,
                         'base_filename': base_filename,  # Pass base filename for batch processing
                         'output_dir': outputs_dir,  # Pass output directory to subprocess
-                        'text_embeddings_cache': text_embeddings_cache,  # Pass pre-encoded embeddings if available
+                        'text_embeddings_cache': None,  # Extensions must encode their own T5 embeddings
                         'enable_multiline_prompts': False,  # Disable multiline parsing in subprocess (already parsed)
                         'enable_video_extension': False,  # Disable video extensions in subprocess (handled in main process)
                     }
@@ -1417,6 +1479,7 @@ def generate_video(
                                     'fp8_t5': fp8_t5,
                                     'cpu_only_t5': cpu_only_t5,
                                     'fp8_base_model': fp8_base_model,
+                                    'use_sage_attention': use_sage_attention,
                                     'no_audio': no_audio,
                                     'no_block_prep': no_block_prep,
                                     'num_generations': 1,
@@ -1490,7 +1553,7 @@ def generate_video(
                                     blocks_to_swap=None,
                                     video_negative_prompt=video_negative_prompt,
                                     audio_negative_prompt=audio_negative_prompt,
-                                    delete_text_encoder=delete_text_encoder if text_embeddings_cache is None else False,
+                                    delete_text_encoder=delete_text_encoder,
                                     no_block_prep=no_block_prep,
                                     fp8_t5=fp8_t5,
                                     cpu_only_t5=cpu_only_t5,
@@ -1498,7 +1561,7 @@ def generate_video(
                                     vae_tiled_decode=vae_tiled_decode,
                                     vae_tile_size=vae_tile_size,
                                     vae_tile_overlap=vae_tile_overlap,
-                                    text_embeddings_cache=text_embeddings_cache,
+                                    text_embeddings_cache=None,  # Extensions must encode their own T5 embeddings
                                 )
 
                                 # Save extension video with proper naming
@@ -3008,6 +3071,10 @@ def process_batch_generation(
                 print(f"  Prompt: {raw_text_prompt[:100]}{'...' if len(raw_text_prompt) > 100 else ''}")
             print(f"  Image: {'Yes' if image_path else 'No'}")
 
+            # Convert image to PNG for maximum robustness (handles WebP and other formats)
+            if image_path:
+                image_path = convert_image_to_png(image_path)
+
             # Apply auto cropping if enabled and image exists
             # For batch processing with auto-crop, let each image auto-detect its own aspect ratio
             # by passing None for target dimensions (each image in batch may have different aspect ratios)
@@ -3204,6 +3271,9 @@ def load_i2v_example_with_resolution(prompt, img_path):
         return (prompt, None, gr.update(), gr.update(), gr.update(), None)
     
     try:
+        # Don't convert here - conversion will happen during generation
+        # For preview, we'll use the original file to avoid Gradio file serving issues
+        
         img = Image.open(img_path)
         iw, ih = img.size
         if ih == 0 or iw == 0:
@@ -3594,6 +3664,9 @@ def on_media_upload(media_path, auto_crop_image, video_width, video_height):
             image_path = media_path
             input_res_label = ""
         
+        # Don't convert here - conversion will happen during generation
+        # For preview, we'll use the original file to avoid Gradio file serving issues
+        
         # Process the image (whether from video or direct upload)
         img = Image.open(image_path)
         iw, ih = img.size
@@ -3724,13 +3797,14 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                     # Image/Video section - now accepts both
                     gr.Markdown("""
                     **📥 Input Media:** Upload an image or video as your starting point
-                    - **Image:** Used as first frame for generation
-                    - **Video:** Last frame automatically extracted and used + input video merged with generated video
+                    - **Image:** Supports PNG, JPG, WebP, BMP, TIFF, GIF (auto-converted to PNG for accuracy)
+                    - **Video:** Supports MP4, AVI, MOV, MKV, WebM (last frame extracted + merged with output)
                     """)
                     image = gr.File(
                         type="filepath",
                         label="Upload Image or Video",
-                        file_types=["image", "video"],
+                        file_types=[".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".gif", 
+                                   ".mp4", ".avi", ".mov", ".mkv", ".flv", ".wmv", ".webm", ".m4v"],
                         file_count="single"
                     )
                     # Preview of uploaded media (shows original image or extracted frame)
@@ -4992,6 +5066,8 @@ if __name__ == "__main__":
             'delete_text_encoder': True,
             'fp8_t5': False,
             'cpu_only_t5': False,
+            'fp8_base_model': False,
+            'use_sage_attention': False,
             'no_audio': False,
             'no_block_prep': False,
             'num_generations': 1,
@@ -4999,6 +5075,16 @@ if __name__ == "__main__":
             'save_metadata': True,
             'aspect_ratio': '16:9',
             'clear_all': False,
+            'vae_tiled_decode': False,
+            'vae_tile_size': 128,
+            'vae_tile_overlap': 16,
+            'base_resolution_width': 720,
+            'base_resolution_height': 720,
+            'duration_seconds': 5,
+            'auto_crop_image': True,
+            'base_filename': None,
+            'output_dir': None,
+            'text_embeddings_cache': None,
             'enable_multiline_prompts': False,
             'enable_video_extension': False,
             'dont_auto_combine_video_input': False,
