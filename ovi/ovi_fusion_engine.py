@@ -59,6 +59,9 @@ class OviFusionEngine:
         # Fusion Model FP8 configuration (set during first generation)
         self.fp8_base_model = False
         
+        # Sage Attention configuration (set during first generation)
+        self.use_sage_attention = False
+        
         # VAE Tiled Decoding Configuration
         self.vae_tiled_decode = False
         self.vae_tile_size = 32  # Latent space tile size (32 latent = 512 pixels after 16x upscale)
@@ -586,6 +589,7 @@ class OviFusionEngine:
                     fp8_t5=False,
                     cpu_only_t5=False,
                     fp8_base_model=False,
+                    use_sage_attention=False,
                     vae_tiled_decode=False,
                     vae_tile_size=32,
                     vae_tile_overlap=8,
@@ -605,6 +609,12 @@ class OviFusionEngine:
         
         # CRITICAL: Set Fusion Model FP8 configuration BEFORE any loading!
         self.fp8_base_model = fp8_base_model
+        
+        # CRITICAL: Set Sage Attention configuration BEFORE any generation!
+        self.use_sage_attention = use_sage_attention
+        # Import and set global attention mode
+        from ovi.modules.attention import set_use_sage_attention
+        set_use_sage_attention(use_sage_attention)
         
         # Set VAE tiled decoding configuration
         self.vae_tiled_decode = vae_tiled_decode

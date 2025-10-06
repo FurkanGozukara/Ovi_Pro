@@ -870,6 +870,7 @@ def generate_video(
     fp8_t5,
     cpu_only_t5,
     fp8_base_model,
+    use_sage_attention,
     no_audio,
     no_block_prep,
     num_generations,
@@ -1169,6 +1170,7 @@ def generate_video(
                         'fp8_t5': fp8_t5,
                         'cpu_only_t5': cpu_only_t5,
                         'fp8_base_model': fp8_base_model,
+                        'use_sage_attention': use_sage_attention,
                         'no_audio': no_audio,
                         'no_block_prep': no_block_prep,
                         'num_generations': 1,  # Always 1 for subprocess
@@ -1267,6 +1269,7 @@ def generate_video(
                         fp8_t5=fp8_t5,
                         cpu_only_t5=cpu_only_t5,
                         fp8_base_model=fp8_base_model,
+                        use_sage_attention=use_sage_attention,
                         vae_tiled_decode=vae_tiled_decode,
                         vae_tile_size=vae_tile_size,
                         vae_tile_overlap=vae_tile_overlap,
@@ -2343,7 +2346,7 @@ def save_preset(preset_name, current_preset,
                 video_seed, randomize_seed, no_audio, save_metadata,
                 solver_name, sample_steps, num_generations,
                 shift, video_guidance_scale, audio_guidance_scale, slg_layer,
-                blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model,
+                blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model, use_sage_attention,
                 video_negative_prompt, audio_negative_prompt,
                 batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
                 vae_tiled_decode, vae_tile_size, vae_tile_overlap,
@@ -2359,7 +2362,7 @@ def save_preset(preset_name, current_preset,
 
         if not preset_name.strip():
             presets = get_available_presets()
-            return gr.update(choices=presets, value=None), gr.update(value=""), *[gr.update() for _ in range(31)], "Please enter a preset name or select a preset to overwrite"
+            return gr.update(choices=presets, value=None), gr.update(value=""), *[gr.update() for _ in range(37)], "Please enter a preset name or select a preset to overwrite"
 
         preset_file = os.path.join(presets_dir, f"{preset_name}.json")
 
@@ -2388,6 +2391,7 @@ def save_preset(preset_name, current_preset,
             "fp8_t5": fp8_t5,
             "cpu_only_t5": cpu_only_t5,
             "fp8_base_model": fp8_base_model,
+            "use_sage_attention": use_sage_attention,
             "video_negative_prompt": video_negative_prompt,
             "audio_negative_prompt": audio_negative_prompt,
             "batch_input_folder": batch_input_folder,
@@ -2423,20 +2427,20 @@ def save_preset(preset_name, current_preset,
 
     except Exception as e:
         presets = get_available_presets()
-        return gr.update(choices=presets, value=None), gr.update(value=""), *[gr.update() for _ in range(31)], f"Error saving preset: {e}"
+        return gr.update(choices=presets, value=None), gr.update(value=""), *[gr.update() for _ in range(37)], f"Error saving preset: {e}"
 
 def load_preset(preset_name):
     """Load a preset and return all UI values with robust error handling."""
     try:
         if not preset_name:
-            return [gr.update() for _ in range(32)] + [gr.update(value=None)] + ["No preset selected"]
+            return [gr.update() for _ in range(37)] + [gr.update(value=None)] + ["No preset selected"]
 
         # Use the robust loading system
         preset_data, error_msg = load_preset_safely(preset_name)
 
         if preset_data is None:
             # Loading failed, return error state
-            return [gr.update() for _ in range(32)] + [gr.update(value=None)] + [error_msg]
+            return [gr.update() for _ in range(37)] + [gr.update(value=None)] + [error_msg]
 
         # Save as last used for auto-load (only if loading succeeded)
         try:
@@ -2518,6 +2522,7 @@ def load_preset(preset_name):
             gr.update(value=preset_data["fp8_t5"]),
             gr.update(value=preset_data["cpu_only_t5"]),
             gr.update(value=preset_data["fp8_base_model"]),
+            gr.update(value=preset_data.get("use_sage_attention", False)),
             gr.update(value=preset_data["video_negative_prompt"]),
             gr.update(value=preset_data["audio_negative_prompt"]),
             gr.update(value=preset_data["batch_input_folder"]),
@@ -2539,7 +2544,7 @@ def load_preset(preset_name):
     except Exception as e:
         error_msg = f"Unexpected error loading preset: {e}"
         print(f"[PRESET] {error_msg}")
-        return [gr.update() for _ in range(32)] + [gr.update(value=None)] + [error_msg]
+        return [gr.update() for _ in range(37)] + [gr.update(value=None)] + [error_msg]
 
 def initialize_app_with_auto_load():
     """Initialize app with preset dropdown choices and auto-load last preset or VRAM-based preset."""
@@ -2693,6 +2698,7 @@ def initialize_app_with_auto_load():
             fp8_t5_update,  # fp8_t5 (potentially modified)
             gr.update(),  # cpu_only_t5
             gr.update(),  # fp8_base_model
+            gr.update(),  # use_sage_attention
             gr.update(),  # video_negative_prompt
             gr.update(),  # audio_negative_prompt
             gr.update(),  # batch_input_folder
@@ -2713,7 +2719,7 @@ def initialize_app_with_auto_load():
     except Exception as e:
         print(f"Warning: Could not initialize app with auto-load: {e}")
         presets = get_available_presets()
-        return gr.update(choices=presets, value=None), *[gr.update() for _ in range(32)], ""
+        return gr.update(choices=presets, value=None), *[gr.update() for _ in range(37)], ""
 
 def initialize_app():
     """Initialize app with preset dropdown choices."""
@@ -2762,6 +2768,7 @@ MEMORY OPTIMIZATION:
 - Scaled FP8 T5: {generation_params.get('fp8_t5', False)}
 - CPU-Only T5: {generation_params.get('cpu_only_t5', False)}
 - Scaled FP8 Base Model: {generation_params.get('fp8_base_model', False)}
+- Sage Attention: {generation_params.get('use_sage_attention', False)}
 - No Block Prep: {generation_params.get('no_block_prep', False)}
 - Clear All Memory: {generation_params.get('clear_all', False)}
 
@@ -2850,6 +2857,7 @@ def process_batch_generation(
     fp8_t5,
     cpu_only_t5,
     fp8_base_model,
+    use_sage_attention,
     no_audio,
     no_block_prep,
     num_generations,
@@ -3063,6 +3071,7 @@ def process_batch_generation(
                         'fp8_t5': fp8_t5,
                         'cpu_only_t5': cpu_only_t5,
                         'fp8_base_model': fp8_base_model,
+                        'use_sage_attention': use_sage_attention,
                         'no_audio': no_audio,
                         'no_block_prep': no_block_prep,
                         'num_generations': 1,
@@ -3126,6 +3135,7 @@ def process_batch_generation(
                             fp8_t5=fp8_t5,
                             cpu_only_t5=cpu_only_t5,
                             fp8_base_model=fp8_base_model,
+                            use_sage_attention=use_sage_attention,
                             no_audio=no_audio,
                             no_block_prep=no_block_prep,
                             num_generations=1,  # Generate one at a time in batch mode
@@ -3895,12 +3905,17 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                                 info="Keep T5 on CPU and run inference on CPU (saves VRAM but slower encoding)"
                             )
                         
-                        # Inference Model FP8 Option
+                        # Inference Model FP8 Option and Sage Attention
                         with gr.Row():
                             fp8_base_model = gr.Checkbox(
                                 label="Scaled FP8 Base Model",
                                 value=False,
                                 info="Use FP8 for transformer blocks (~50% VRAM savings during inference, works with block swap)"
+                            )
+                            use_sage_attention = gr.Checkbox(
+                                label="Sage Attention",
+                                value=False,
+                                info="Use Sage Attention for ~10% speedup & lower VRAM (requires sageattention package)"
                             )
 
                         # VAE Tiled Decoding Controls
@@ -4555,7 +4570,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             video_text_prompt, image_to_use, video_height, video_width, video_seed, solver_name,
             sample_steps, shift, video_guidance_scale, audio_guidance_scale,
             slg_layer, blocks_to_swap, video_negative_prompt, audio_negative_prompt,
-            gr.Checkbox(value=False, visible=False), cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model,
+            gr.Checkbox(value=False, visible=False), cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model, use_sage_attention,
             no_audio, gr.Checkbox(value=False, visible=False),
             num_generations, randomize_seed, save_metadata, aspect_ratio, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
@@ -4614,7 +4629,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             video_height, video_width, solver_name, sample_steps, shift,
             video_guidance_scale, audio_guidance_scale, slg_layer, blocks_to_swap,
             video_negative_prompt, audio_negative_prompt, cpu_offload,
-            delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model, no_audio, gr.Checkbox(value=False, visible=False),
+            delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model, use_sage_attention, no_audio, gr.Checkbox(value=False, visible=False),
             num_generations, randomize_seed, save_metadata, aspect_ratio, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds, auto_crop_image,
@@ -4632,7 +4647,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             video_seed, randomize_seed, no_audio, save_metadata,
             solver_name, sample_steps, num_generations,
             shift, video_guidance_scale, audio_guidance_scale, slg_layer,
-            blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model,
+            blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model, use_sage_attention,
             video_negative_prompt, audio_negative_prompt,
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
@@ -4645,7 +4660,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             video_seed, randomize_seed, no_audio, save_metadata,
             solver_name, sample_steps, num_generations,
             shift, video_guidance_scale, audio_guidance_scale, slg_layer,
-            blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model,
+            blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model, use_sage_attention,
             video_negative_prompt, audio_negative_prompt,
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
@@ -4663,7 +4678,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             video_seed, randomize_seed, no_audio, save_metadata,
             solver_name, sample_steps, num_generations,
             shift, video_guidance_scale, audio_guidance_scale, slg_layer,
-            blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model,
+            blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model, use_sage_attention,
             video_negative_prompt, audio_negative_prompt,
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
@@ -4682,7 +4697,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             video_seed, randomize_seed, no_audio, save_metadata,
             solver_name, sample_steps, num_generations,
             shift, video_guidance_scale, audio_guidance_scale, slg_layer,
-            blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model,
+            blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model, use_sage_attention,
             video_negative_prompt, audio_negative_prompt,
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
@@ -4709,7 +4724,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             video_seed, randomize_seed, no_audio, save_metadata,
             solver_name, sample_steps, num_generations,
             shift, video_guidance_scale, audio_guidance_scale, slg_layer,
-            blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model,
+            blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model, use_sage_attention,
             video_negative_prompt, audio_negative_prompt,
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,

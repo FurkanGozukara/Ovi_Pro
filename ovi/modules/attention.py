@@ -13,12 +13,50 @@ try:
 except ModuleNotFoundError:
     FLASH_ATTN_2_AVAILABLE = False
 
+try:
+    from sageattention import sageattn
+    SAGE_ATTENTION_AVAILABLE = True
+except ImportError:
+    sageattn = None
+    SAGE_ATTENTION_AVAILABLE = False
+
 import warnings
+
+# Global configuration for Sage Attention
+_USE_SAGE_ATTENTION = False
+_ATTENTION_DEBUG_PRINTED = False  # Flag to print debug info only once
+
+def set_use_sage_attention(enabled: bool):
+    """
+    Set global flag to use Sage Attention for all attention operations.
+    This must be called before model forward passes.
+    
+    Args:
+        enabled: If True, use Sage Attention when available
+    """
+    global _USE_SAGE_ATTENTION, _ATTENTION_DEBUG_PRINTED
+    _USE_SAGE_ATTENTION = enabled
+    _ATTENTION_DEBUG_PRINTED = False  # Reset debug flag when configuration changes
+    
+    if enabled and SAGE_ATTENTION_AVAILABLE:
+        print("[SAGE ATTENTION] Enabled - using Sage Attention for ~10% speedup & lower VRAM", flush=True)
+    elif enabled and not SAGE_ATTENTION_AVAILABLE:
+        print("[SAGE ATTENTION] Requested but not available - falling back to Flash Attention", flush=True)
+        print("[SAGE ATTENTION] Install with: pip install sageattention", flush=True)
+
+def get_use_sage_attention() -> bool:
+    """Get current Sage Attention configuration."""
+    global _USE_SAGE_ATTENTION
+    return _USE_SAGE_ATTENTION
 
 __all__ = [
     'flash_attention',
+    'sage_attention',
     'attention',
     'attention_with_weights',
+    'SAGE_ATTENTION_AVAILABLE',
+    'set_use_sage_attention',
+    'get_use_sage_attention',
 ]
 
 
@@ -50,6 +88,41 @@ def flash_attention(
     deterministic:  bool. If True, slightly slower and uses more memory.
     dtype:          torch.dtype. Apply when dtype of q/k/v is not float16/bfloat16.
     """
+    # CRITICAL: Check if Sage Attention is enabled and dispatch to it if so
+    # The model calls flash_attention() directly, so we intercept here
+    global _USE_SAGE_ATTENTION, _ATTENTION_DEBUG_PRINTED
+    
+    if _USE_SAGE_ATTENTION and SAGE_ATTENTION_AVAILABLE:
+        # Print debug info once
+        if not _ATTENTION_DEBUG_PRINTED:
+            print("=" * 80, flush=True)
+            print("[ATTENTION BACKEND] >>> SAGE ATTENTION <<<", flush=True)
+            print("[ATTENTION BACKEND] Sage Attention is ACTIVE for all attention operations", flush=True)
+            print("=" * 80, flush=True)
+            _ATTENTION_DEBUG_PRINTED = True
+        
+        # Dispatch to Sage Attention
+        return sage_attention(
+            q=q,
+            k=k,
+            v=v,
+            q_lens=q_lens,
+            k_lens=k_lens,
+            dropout_p=dropout_p,
+            softmax_scale=softmax_scale,
+            q_scale=q_scale,
+            causal=causal,
+            dtype=dtype,
+        )
+    
+    # Otherwise, proceed with Flash Attention as normal
+    if not _ATTENTION_DEBUG_PRINTED:
+        print("=" * 80, flush=True)
+        fa_version = 3 if FLASH_ATTN_3_AVAILABLE else 2 if FLASH_ATTN_2_AVAILABLE else None
+        print(f"[ATTENTION BACKEND] Flash Attention {fa_version}", flush=True)
+        print("=" * 80, flush=True)
+        _ATTENTION_DEBUG_PRINTED = True
+    
     half_dtypes = (torch.float16, torch.bfloat16)
     assert dtype in half_dtypes
     assert q.device.type == 'cuda' and q.size(-1) <= 256
@@ -132,6 +205,106 @@ def flash_attention(
             window_size=window_size,
             deterministic=deterministic).unflatten(0, (b, lq))
 
+    # output
+    return x.type(out_dtype)
+
+
+def sage_attention(
+    q,
+    k,
+    v,
+    q_lens=None,
+    k_lens=None,
+    dropout_p=0.,
+    softmax_scale=None,
+    q_scale=None,
+    causal=False,
+    dtype=torch.bfloat16,
+):
+    """
+    Sage Attention implementation for faster inference with lower VRAM usage.
+    
+    Args:
+        q:              [B, Lq, Nq, C1]. Query tensor
+        k:              [B, Lk, Nk, C1]. Key tensor
+        v:              [B, Lk, Nk, C2]. Value tensor. Nq must be divisible by Nk.
+        q_lens:         [B]. Query sequence lengths
+        k_lens:         [B]. Key sequence lengths
+        dropout_p:      float. Dropout probability (not used during inference)
+        softmax_scale:  float. The scaling of QK^T before applying softmax.
+        q_scale:        float. Additional query scaling
+        causal:         bool. Whether to apply causal attention mask.
+        dtype:          torch.dtype. Target dtype for computation
+    
+    Returns:
+        Attention output tensor with shape [B, Lq, Nq, C2]
+    """
+    half_dtypes = (torch.float16, torch.bfloat16)
+    assert dtype in half_dtypes
+    assert q.device.type == 'cuda' and q.size(-1) <= 256
+    
+    # params
+    b, lq, lk, out_dtype = q.size(0), q.size(1), k.size(1), q.dtype
+    
+    def half(x):
+        return x if x.dtype in half_dtypes else x.to(dtype)
+    
+    # Convert to half precision
+    q = half(q)
+    k = half(k)
+    v = half(v)
+    
+    # Apply q_scale if provided
+    if q_scale is not None:
+        q = q * q_scale
+    
+    # Sage attention expects NHD format: (batch_size, seq_len, num_heads, head_dim)
+    # Our input is already in BLHD format, which is the same as NHD
+    
+    # Handle variable length sequences by trimming if needed
+    if q_lens is not None or k_lens is not None:
+        # For variable length, we need to process each sequence individually
+        # This is less efficient but necessary for proper handling
+        warnings.warn(
+            'Variable length sequences with Sage Attention may be slower. '
+            'Consider using fixed-length sequences or Flash Attention for better performance.'
+        )
+        
+        # Process each batch element separately
+        outputs = []
+        for i in range(b):
+            q_len = q_lens[i].item() if q_lens is not None else lq
+            k_len = k_lens[i].item() if k_lens is not None else lk
+            
+            q_i = q[i:i+1, :q_len]
+            k_i = k[i:i+1, :k_len]
+            v_i = v[i:i+1, :k_len]
+            
+            # Call sageattn with NHD layout
+            out_i = sageattn(
+                q_i, k_i, v_i,
+                tensor_layout="NHD",
+                is_causal=causal,
+                sm_scale=softmax_scale
+            )
+            
+            # Pad back to original length if needed
+            if q_len < lq:
+                pad_len = lq - q_len
+                out_i = torch.nn.functional.pad(out_i, (0, 0, 0, 0, 0, pad_len))
+            
+            outputs.append(out_i)
+        
+        x = torch.cat(outputs, dim=0)
+    else:
+        # Fixed length - can process entire batch at once (fastest path)
+        x = sageattn(
+            q, k, v,
+            tensor_layout="NHD",
+            is_causal=causal,
+            sm_scale=softmax_scale
+        )
+    
     # output
     return x.type(out_dtype)
 
@@ -261,8 +434,57 @@ def attention(
     deterministic=False,
     dtype=torch.bfloat16,
     fa_version=None,
+    use_sage_attn=None,
 ):
-    if FLASH_ATTN_2_AVAILABLE or FLASH_ATTN_3_AVAILABLE:
+    """
+    Main attention dispatcher function.
+    
+    Args:
+        use_sage_attn: If True and SAGE_ATTENTION_AVAILABLE, use Sage Attention.
+                      If None, uses global configuration from set_use_sage_attention().
+                      Otherwise falls back to Flash Attention or PyTorch SDPA.
+    """
+    # Use global configuration if not explicitly specified
+    if use_sage_attn is None:
+        use_sage_attn = _USE_SAGE_ATTENTION
+    
+    # Debug: Show attention backend selection (print only once per configuration change)
+    global _ATTENTION_DEBUG_PRINTED
+    if not _ATTENTION_DEBUG_PRINTED:
+        print("=" * 80, flush=True)
+        if use_sage_attn and SAGE_ATTENTION_AVAILABLE:
+            backend = "SAGE ATTENTION"
+            print(f"[ATTENTION BACKEND] >>> {backend} <<<", flush=True)
+            print("[ATTENTION BACKEND] Sage Attention is ACTIVE for all attention operations", flush=True)
+        elif use_sage_attn and not SAGE_ATTENTION_AVAILABLE:
+            backend = "Flash Attention (Sage unavailable, fallback)"
+            print(f"[ATTENTION BACKEND] {backend}", flush=True)
+            print("[ATTENTION BACKEND] WARNING: Sage Attention was requested but not available", flush=True)
+        elif FLASH_ATTN_2_AVAILABLE or FLASH_ATTN_3_AVAILABLE:
+            fa_version = 3 if FLASH_ATTN_3_AVAILABLE else 2
+            backend = f"Flash Attention {fa_version}"
+            print(f"[ATTENTION BACKEND] {backend}", flush=True)
+        else:
+            backend = "PyTorch SDPA (fallback)"
+            print(f"[ATTENTION BACKEND] {backend}", flush=True)
+        print("=" * 80, flush=True)
+        _ATTENTION_DEBUG_PRINTED = True
+    
+    # Priority: Sage Attention (if requested and available) > Flash Attention > PyTorch SDPA
+    if use_sage_attn and SAGE_ATTENTION_AVAILABLE:
+        return sage_attention(
+            q=q,
+            k=k,
+            v=v,
+            q_lens=q_lens,
+            k_lens=k_lens,
+            dropout_p=dropout_p,
+            softmax_scale=softmax_scale,
+            q_scale=q_scale,
+            causal=causal,
+            dtype=dtype,
+        )
+    elif FLASH_ATTN_2_AVAILABLE or FLASH_ATTN_3_AVAILABLE:
         return flash_attention(
             q=q,
             k=k,
@@ -279,6 +501,7 @@ def attention(
             version=fa_version,
         )
     else:
+        # Fallback to PyTorch scaled_dot_product_attention
         if q_lens is not None or k_lens is not None:
             warnings.warn(
                 'Padding mask is disabled when using scaled_dot_product_attention. It can have a significant impact on performance.'
