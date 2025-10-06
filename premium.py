@@ -3790,6 +3790,19 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                                 info="Video duration in seconds (longer durations use more VRAM)"
                             )
 
+                        # Multi-line Prompts and Video Extension Options
+                        with gr.Row():
+                            enable_multiline_prompts = gr.Checkbox(
+                                label="Enable Multi-line Prompts",
+                                value=False,
+                                info="Each line in the prompt becomes a separate new unique generation (lines < 4 chars are skipped). This is different than Video Extension, don't enable both at the same time."
+                            )
+                            enable_video_extension = gr.Checkbox(
+                                label="Enable Video Extension (Last Frame Based)",
+                                value=False,
+                                info="Automatically extend last generated video using each line in prompt as extension (lines < 3 chars skipped). 4 Lines Prompt = 1 base + 3 times extension 20 seconds video. Uses last frame."
+                            )
+
                         # Video seed, randomize checkbox, disable audio, and save metadata in same row
                         with gr.Row():
                             video_seed = gr.Number(minimum=0, maximum=100000, value=99, label="Video Seed")
@@ -3930,19 +3943,6 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                                 step=2,
                                 label="Tile Overlap",
                                 info="Overlap for seamless blending: 4=fast, 8=balanced ⭐, 16=best quality"
-                            )
-
-                        # Multi-line Prompts and Video Extension Options
-                        with gr.Row():
-                            enable_multiline_prompts = gr.Checkbox(
-                                label="Enable Multi-line Prompts",
-                                value=False,
-                                info="Each line in the prompt becomes a separate new unique generation (lines < 4 chars are skipped). This is different than Video Extension, don't enable both at the same time."
-                            )
-                            enable_video_extension = gr.Checkbox(
-                                label="Enable Video Extension (Last Frame Based)",
-                                value=False,
-                                info="Automatically extend last generated video using each line in prompt as extension (lines < 3 chars skipped). 4 Lines Prompt = 1 base + 3 times extension 20 seconds video. Uses last frame."
                             )
 
                         # Negative prompts in same row, 3 lines each
