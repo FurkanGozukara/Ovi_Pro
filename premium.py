@@ -534,6 +534,39 @@ def validate_prompt_format(text_prompt):
     
     return True, None
 
+def parse_duration_from_prompt(text_prompt):
+    """Parse duration override from prompt syntax {x} at the beginning.
+
+    Looks for {number} at the start of prompt (with optional spaces around it).
+    Returns tuple: (cleaned_prompt, duration_override)
+    If no duration override found, returns (original_prompt, None)
+    """
+    import re
+
+    if not text_prompt or not isinstance(text_prompt, str):
+        return text_prompt, None
+
+    # Pattern to match {number} at the beginning with optional spaces
+    # \s* matches any whitespace (including newlines)
+    # \{(\d+(?:\.\d+)?)\} matches {number} where number can be integer or float
+    pattern = r'^\s*\{(\d+(?:\.\d+)?)\}\s*'
+
+    match = re.match(pattern, text_prompt, re.MULTILINE)
+    if match:
+        duration_str = match.group(1)
+        try:
+            duration = float(duration_str)
+            # Remove the duration syntax from prompt
+            cleaned_prompt = re.sub(pattern, '', text_prompt, count=1, flags=re.MULTILINE)
+            print(f"[DURATION OVERRIDE] Found duration override: {duration} seconds")
+            print(f"[DURATION OVERRIDE] Cleaned prompt: {cleaned_prompt[:100]}...")
+            return cleaned_prompt, duration
+        except ValueError:
+            print(f"[DURATION OVERRIDE] Invalid duration format: {duration_str}")
+            return text_prompt, None
+
+    return text_prompt, None
+
 def parse_multiline_prompts(text_prompt, enable_multiline_prompts):
     """Parse multi-line prompts into individual prompts, filtering out short lines."""
     if not enable_multiline_prompts:
@@ -1034,7 +1067,17 @@ def generate_video(
         print(error_message)
         print("=" * 80)
         raise ValueError(f"Invalid prompt format:\n\n{error_message}")
-    
+
+    # Store original duration before any overrides
+    original_duration_seconds = duration_seconds
+
+    # Check for duration override in prompt syntax {x}
+    original_prompt = text_prompt
+    text_prompt, duration_override = parse_duration_from_prompt(text_prompt)
+    if duration_override is not None:
+        duration_seconds = duration_override
+        print(f"[DURATION OVERRIDE] Duration changed from UI slider to {duration_seconds} seconds")
+
     # Parse prompts for video extension validation (always parse to count lines)
     validation_prompts = parse_multiline_prompts(text_prompt, True)  # Always parse for validation
 
@@ -1477,7 +1520,8 @@ def generate_video(
                             vae_tile_size, vae_tile_overlap, video_negative_prompt, audio_negative_prompt,
                             is_extension=is_extension,
                             extension_index=extension_index,
-                            is_batch=False
+                            is_batch=False,
+                            duration_override=duration_override
                         )
                         save_generation_metadata(output_path, generation_params, current_seed)
 
@@ -1504,7 +1548,15 @@ def generate_video(
                             else:
                                 extension_prompt = current_prompt  # Repeat current prompt
                                 print(f"[VIDEO EXTENSION] Extension {ext_idx + 1}: Repeating current prompt (no more prompts available)")
-                            print(f"[VIDEO EXTENSION] Extension {ext_idx + 1}: Using last frame + prompt: {extension_prompt[:50]}{'...' if len(extension_prompt) > 50 else ''}")
+                            # Parse extension prompt for duration override
+                            ext_cleaned_prompt, ext_duration_override = parse_duration_from_prompt(extension_prompt)
+                            # Default to original UI slider value, not the main video's potentially overridden duration
+                            ext_duration_seconds = original_duration_seconds
+                            if ext_duration_override is not None:
+                                ext_duration_seconds = ext_duration_override
+                                print(f"[VIDEO EXTENSION] Extension {ext_idx + 1} duration override: {ext_duration_seconds} seconds")
+
+                            print(f"[VIDEO EXTENSION] Extension {ext_idx + 1}: Using last frame + prompt: {ext_cleaned_prompt[:50]}{'...' if len(ext_cleaned_prompt) > 50 else ''}")
 
                             # Generate extension video
                             check_cancellation()
@@ -1527,7 +1579,7 @@ def generate_video(
 
                                 # Run extension in subprocess
                                 ext_params = {
-                                    'text_prompt': extension_prompt,
+                                    'text_prompt': ext_cleaned_prompt,
                                     'image': current_image_path,
                                     'video_frame_height': video_frame_height,
                                     'video_frame_width': video_frame_width,
@@ -1560,7 +1612,7 @@ def generate_video(
                                     'vae_tile_overlap': vae_tile_overlap,
                                     'base_resolution_width': base_resolution_width,
                                     'base_resolution_height': base_resolution_height,
-                                    'duration_seconds': duration_seconds,
+                                    'duration_seconds': ext_duration_seconds,
                                     'auto_crop_image': False,  # Image already processed
                                     'base_filename': f"{current_main_base}_ext{ext_idx + 1}",
                                     'output_dir': outputs_dir,
@@ -1601,7 +1653,7 @@ def generate_video(
                                 # Generate extension in-process
                                 ext_generated_video, ext_generated_audio, _ = generate_with_cancellation_check(
                                     ovi_engine.generate,
-                                    text_prompt=extension_prompt,
+                                    text_prompt=ext_cleaned_prompt,
                                     image_path=current_image_path,
                                     video_frame_height_width=[video_frame_height, video_frame_width],
                                     seed=current_seed,
@@ -1645,14 +1697,15 @@ def generate_video(
 
                                 # Save metadata for extension
                                 ext_generation_params = build_generation_metadata_params(
-                                    extension_prompt, current_image_path, video_frame_height, video_frame_width,
-                                    aspect_ratio, base_resolution_width, base_resolution_height, duration_seconds,
+                                    ext_cleaned_prompt, current_image_path, video_frame_height, video_frame_width,
+                                    aspect_ratio, base_resolution_width, base_resolution_height, ext_duration_seconds,
                                     randomize_seed, num_generations, solver_name, sample_steps, shift,
                                     video_guidance_scale, audio_guidance_scale, slg_layer, None,  # blocks_to_swap=None for extensions
                                     cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model,
                                     use_sage_attention, no_audio, no_block_prep, clear_all, vae_tiled_decode,
                                     vae_tile_size, vae_tile_overlap, video_negative_prompt, audio_negative_prompt,
-                                    is_extension=True, extension_index=ext_idx + 1, is_batch=False
+                                    is_extension=True, extension_index=ext_idx + 1, is_batch=False,
+                                    duration_override=ext_duration_override
                                 )
                                 save_generation_metadata(ext_output_path, ext_generation_params, current_seed)
 
@@ -2874,7 +2927,7 @@ def build_generation_metadata_params(text_prompt, image_path, video_frame_height
                                    cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model,
                                    use_sage_attention, no_audio, no_block_prep, clear_all, vae_tiled_decode,
                                    vae_tile_size, vae_tile_overlap, video_negative_prompt, audio_negative_prompt,
-                                   is_extension=False, extension_index=0, is_batch=False):
+                                   is_extension=False, extension_index=0, is_batch=False, duration_override=None):
     """Build metadata parameters dictionary to avoid code duplication."""
     return {
         'text_prompt': text_prompt,
@@ -2910,7 +2963,8 @@ def build_generation_metadata_params(text_prompt, image_path, video_frame_height
         'audio_negative_prompt': audio_negative_prompt,
         'is_extension': is_extension,
         'extension_index': extension_index,
-        'is_batch': is_batch
+        'is_batch': is_batch,
+        'duration_override': duration_override
     }
 
 def save_generation_metadata(output_path, generation_params, used_seed):
@@ -2934,6 +2988,7 @@ VIDEO PARAMETERS:
 - Aspect Ratio: {generation_params.get('aspect_ratio', 'N/A')}
 - Base Resolution: {generation_params.get('base_resolution_width', 720)}x{generation_params.get('base_resolution_height', 720)}
 - Duration: {generation_params.get('duration_seconds', 5)} seconds
+{f'- Duration Override: {generation_params.get("duration_override", "None")} (from prompt syntax {{x}})' if generation_params.get('duration_override') is not None else ''}
 - Seed Used: {used_seed}
 - Randomize Seed: {generation_params.get('randomize_seed', False)}
 - Number of Generations: {generation_params.get('num_generations', 1)}
@@ -3244,6 +3299,15 @@ def process_batch_generation(
                 else:
                     current_base_name = base_name
 
+                # Check for duration override in prompt syntax {x} for batch processing
+                batch_prompt, batch_duration_override = parse_duration_from_prompt(current_prompt)
+                if batch_duration_override is not None:
+                    batch_duration_seconds = batch_duration_override
+                    print(f"[BATCH DURATION OVERRIDE] Duration changed to {batch_duration_seconds} seconds for prompt: {batch_prompt[:50]}...")
+                else:
+                    batch_prompt = current_prompt  # Use original if no override
+                    batch_duration_seconds = duration_seconds  # Use parameter default
+
                 # Generate multiple videos for this prompt
                 for gen_idx in range(int(num_generations)):
                     # Check for cancellation in the loop
@@ -3261,7 +3325,7 @@ def process_batch_generation(
                 if clear_all:
                     # Run this batch generation in a subprocess for memory cleanup
                     single_gen_params = {
-                        'text_prompt': current_prompt,
+                        'text_prompt': batch_prompt,
                         'image': final_image_path,
                         'video_frame_height': batch_video_height,  # Use detected dimensions
                         'video_frame_width': batch_video_width,    # Use detected dimensions
@@ -3294,7 +3358,7 @@ def process_batch_generation(
                         'vae_tile_overlap': vae_tile_overlap,
                         'base_resolution_width': base_resolution_width,
                         'base_resolution_height': base_resolution_height,
-                        'duration_seconds': duration_seconds,
+                        'duration_seconds': batch_duration_seconds,
                         'auto_crop_image': False,  # Image already cropped in main process
                         'base_filename': current_base_name,  # Use current base name for batch processing (handles multiline numbering)
                         'output_dir': outputs_dir,  # Pass output directory to subprocess
@@ -3325,7 +3389,7 @@ def process_batch_generation(
                     try:
                         # Call generate_video() which handles everything including video extensions
                         last_output_path = generate_video(
-                            text_prompt=current_prompt,
+                            text_prompt=batch_prompt,
                             image=final_image_path,
                             video_frame_height=batch_video_height,
                             video_frame_width=batch_video_width,
@@ -3358,7 +3422,7 @@ def process_batch_generation(
                             vae_tile_overlap=vae_tile_overlap,
                             base_resolution_width=base_resolution_width,
                             base_resolution_height=base_resolution_height,
-                            duration_seconds=duration_seconds,
+                            duration_seconds=batch_duration_seconds,
                             auto_crop_image=False,  # Image already cropped
                             base_filename=current_base_name,  # Use batch-specific filename
                             output_dir=outputs_dir,
@@ -3951,7 +4015,7 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height):
 theme = gr.themes.Soft()
 theme.font = ["Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v5.7 : https://www.patreon.com/posts/140393220")
+    gr.Markdown("# Ovi Pro SECourses Premium App v5.8 : https://www.patreon.com/posts/140393220")
 
     image_to_use = gr.State(value=None)
     input_video_state = gr.State(value=None)  # Store input video path for merging
