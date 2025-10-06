@@ -1,7 +1,7 @@
 {
   "preset_version": "3.2",
   "video_text_prompt": "",
-  "aspect_ratio": "16:9",
+  "aspect_ratio": "16:9 - 960x544px",
   "video_width": 992,
   "video_height": 512,
   "auto_crop_image": true,
@@ -21,6 +21,8 @@
   "delete_text_encoder": false,
   "fp8_t5": false,
   "cpu_only_t5": false,
+  "fp8_base_model": false,
+  "use_sage_attention": true,
   "video_negative_prompt": "jitter, bad hands, blur, distortion",
   "audio_negative_prompt": "robotic, muffled, echo, distorted",
   "batch_input_folder": "",
@@ -30,6 +32,10 @@
   "vae_tiled_decode": false,
   "vae_tile_size": 28,
   "vae_tile_overlap": 8,
-  "force_exact_resolution": true,
-  "saved_at": "2025-10-05T12:10:00.924015"
+  "base_resolution_width": 720,
+  "base_resolution_height": 720,
+  "duration_seconds": 5,
+  "enable_multiline_prompts": false,
+  "enable_video_extension": false,
+  "saved_at": "2025-10-06T16:53:10.823103"
 }

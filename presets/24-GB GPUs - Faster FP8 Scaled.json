@@ -22,6 +22,7 @@
   "fp8_t5": true,
   "cpu_only_t5": false,
   "fp8_base_model": true,
+  "use_sage_attention": true,
   "video_negative_prompt": "jitter, bad hands, blur, distortion",
   "audio_negative_prompt": "robotic, muffled, echo, distorted",
   "batch_input_folder": "",
@@ -34,5 +35,7 @@
   "base_resolution_width": 720,
   "base_resolution_height": 720,
   "duration_seconds": 5,
-  "saved_at": "2025-10-05T20:26:44.760539"
+  "enable_multiline_prompts": false,
+  "enable_video_extension": false,
+  "saved_at": "2025-10-06T16:53:01.654759"
 }
