@@ -1,0 +1,1 @@
+{"text_prompt": "Test prompt\nLine 2\nLine 3", "video_negative_prompt": "", "audio_negative_prompt": "", "fp8_t5": false, "cpu_only_t5": false}

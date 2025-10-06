@@ -659,23 +659,7 @@ def generate_video(
     enable_multiline_prompts=False,  # New: Enable multi-line prompt processing
     enable_video_extension=False,  # New: Enable automatic video extension based on prompt lines
 ):
-    # If enable_video_extension is False, try to load it from the last used preset
-    if not enable_video_extension:
-        try:
-            presets_dir = get_presets_dir()
-            last_used_file = os.path.join(presets_dir, "last_used.txt")
-            if os.path.exists(last_used_file):
-                with open(last_used_file, 'r', encoding='utf-8') as f:
-                    last_preset = f.read().strip()
-                if last_preset:
-                    preset_file = os.path.join(presets_dir, f"{last_preset}.json")
-                    if os.path.exists(preset_file):
-                        import json
-                        with open(preset_file, 'r', encoding='utf-8') as f:
-                            preset_data = json.load(f)
-                        enable_video_extension = preset_data.get('enable_video_extension', False)
-        except Exception as e:
-            pass
+    # Note: enable_video_extension is passed directly from UI and should be respected as-is
 
     # Parse prompts for video extension validation (always parse to count lines)
     validation_prompts = parse_multiline_prompts(text_prompt, True)  # Always parse for validation
@@ -750,15 +734,24 @@ def generate_video(
             raise ValueError(f"Video Extension Count {video_extension_count} requires at least {required_prompts} valid prompt lines (1 main + {video_extension_count} extensions), but only {len(validation_prompts)} valid lines found in the prompt text.")
 
     # Parse multi-line prompts for generation based on setting
-    # When video extension is enabled, only use the first prompt for the main generation
-    if enable_video_extension and video_extension_count > 0:
+    # Multi-line prompts and video extensions are mutually exclusive features
+    if enable_multiline_prompts:
+        # When multi-line prompts enabled: generate separate videos for each prompt line
+        individual_prompts = parse_multiline_prompts(text_prompt, enable_multiline_prompts)
+        # Disable video extensions when multi-line prompts are enabled
+        video_extension_count = 0
+    elif enable_video_extension and video_extension_count > 0:
+        # When video extension enabled: only use the first prompt for the main generation
         individual_prompts = [validation_prompts[0]]  # Only first prompt for main generation
     else:
-        individual_prompts = parse_multiline_prompts(text_prompt, enable_multiline_prompts)
+        # Default: single prompt
+        individual_prompts = parse_multiline_prompts(text_prompt, False)
 
     # Debug: Log current generation parameters
     print("=" * 80)
     print("VIDEO GENERATION STARTED")
+    print(f"  enable_multiline_prompts: {enable_multiline_prompts}")
+    print(f"  enable_video_extension: {enable_video_extension}")
     if enable_multiline_prompts:
         print(f"  Multi-line prompts enabled: {len(individual_prompts)} prompts")
         for i, prompt in enumerate(individual_prompts):
@@ -2784,6 +2777,12 @@ def process_batch_generation(
             for prompt_idx, current_prompt in enumerate(individual_prompts):
                 print(f"  [PROMPT {prompt_idx + 1}/{len(individual_prompts)}] Processing: {current_prompt[:50]}{'...' if len(current_prompt) > 50 else ''}")
 
+                # For multi-line prompts in batch processing, append prompt index to avoid overwrites
+                if enable_multiline_prompts and len(individual_prompts) > 1:
+                    current_base_name = f"{base_name}_{prompt_idx + 1}"
+                else:
+                    current_base_name = base_name
+
                 # Generate multiple videos for this prompt
                 for gen_idx in range(int(num_generations)):
                     # Check for cancellation in the loop
@@ -2835,7 +2834,7 @@ def process_batch_generation(
                         'base_resolution_height': base_resolution_height,
                         'duration_seconds': duration_seconds,
                         'auto_crop_image': False,  # Image already cropped in main process
-                        'base_filename': base_name,  # Use base name for batch processing
+                        'base_filename': current_base_name,  # Use current base name for batch processing (handles multiline numbering)
                         'output_dir': outputs_dir,  # Pass output directory to subprocess
                         'enable_multiline_prompts': False,  # Disable in subprocess
                         'enable_video_extension': enable_video_extension,  # Pass through extension setting
@@ -2843,16 +2842,16 @@ def process_batch_generation(
 
                     success = run_generation_subprocess(single_gen_params)
                     if success:
-                        # Find the generated file with base_name prefix in the correct output directory
+                        # Find the generated file with current_base_name prefix in the correct output directory
                         import glob
-                        pattern = os.path.join(outputs_dir, f"{base_name}_*.mp4")
+                        pattern = os.path.join(outputs_dir, f"{current_base_name}_*.mp4")
                         existing_files = glob.glob(pattern)
                         if existing_files:
                             last_output_path = max(existing_files, key=os.path.getctime)
                             print(f"      [SUCCESS] Saved to: {last_output_path}")
                             processed_count += 1
                         else:
-                            print(f"      [WARNING] No output file found for {base_name} in {outputs_dir}")
+                            print(f"      [WARNING] No output file found for {current_base_name} in {outputs_dir}")
                             print(f"      [DEBUG] Search pattern: {pattern}")
                     else:
                         print(f"      [ERROR] Generation failed in subprocess")
@@ -4268,6 +4267,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             num_generations, randomize_seed, save_metadata, aspect_ratio, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds, auto_crop_image,
+            gr.Textbox(value=None, visible=False), gr.Textbox(value=None, visible=False), gr.Textbox(value=None, visible=False),
             enable_multiline_prompts, enable_video_extension,
         ],
         outputs=[output_path],
@@ -4513,12 +4513,7 @@ def run_single_generation_from_file(json_file_path):
         print(f"[SINGLE-GEN] Starting generation with params: {list(params.keys())}")
         print(f"[SINGLE-GEN] Text prompt: {params.get('text_prompt', 'N/A')[:50]}...")
 
-        # Auto-enable video extension if prompt has multiple lines and not explicitly disabled
-        text_prompt = params.get('text_prompt', '')
-        validation_prompts = parse_multiline_prompts(text_prompt, True)
-        if len(validation_prompts) > 1 and not params.get('enable_video_extension', False):
-            print(f"[SINGLE-GEN] Auto-enabling video extension (detected {len(validation_prompts)} prompt lines)")
-            params['enable_video_extension'] = True
+        # No auto-enabling of video extension - only enable if explicitly set
 
         # Run the generation with the provided parameters
         result = generate_video(**params)
