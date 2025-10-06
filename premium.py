@@ -890,6 +890,7 @@ def generate_video(
     text_embeddings_cache=None,  # Pre-encoded text embeddings from T5 subprocess
     enable_multiline_prompts=False,  # New: Enable multi-line prompt processing
     enable_video_extension=False,  # New: Enable automatic video extension based on prompt lines
+    dont_auto_combine_video_input=False,  # New: Don't auto combine video input with generated video
     input_video_path=None,  # New: Input video path for merging (when user uploads video)
     is_video_extension_subprocess=False,  # Internal: Mark subprocess calls for video extensions
 ):
@@ -1555,8 +1556,8 @@ def generate_video(
         total_generation_time = generation_end_time - generation_start_time
         print(f"  Total generation time: {total_generation_time:.2f} seconds")
 
-        # If input video was provided, merge it with the generated video
-        if input_video_path and last_output_path and os.path.exists(last_output_path):
+        # If input video was provided, merge it with the generated video (unless disabled)
+        if input_video_path and last_output_path and os.path.exists(last_output_path) and not dont_auto_combine_video_input:
             print("=" * 80)
             print("INPUT VIDEO MERGING")
             print(f"  Input video: {input_video_path}")
@@ -2125,6 +2126,7 @@ PRESET_DEFAULTS = {
     "duration_seconds": 5,
     "enable_multiline_prompts": False,
     "enable_video_extension": False,
+    "dont_auto_combine_video_input": False,
 }
 
 # Parameter validation rules
@@ -2352,7 +2354,7 @@ def save_preset(preset_name, current_preset,
                 batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
                 vae_tiled_decode, vae_tile_size, vae_tile_overlap,
                 base_resolution_width, base_resolution_height, duration_seconds,
-                enable_multiline_prompts, enable_video_extension):
+                enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input):
     """Save current UI state as a preset."""
     try:
         presets_dir = get_presets_dir()
@@ -2363,7 +2365,7 @@ def save_preset(preset_name, current_preset,
 
         if not preset_name.strip():
             presets = get_available_presets()
-            return gr.update(choices=presets, value=None), gr.update(value=""), *[gr.update() for _ in range(37)], "Please enter a preset name or select a preset to overwrite"
+            return gr.update(choices=presets, value=None), gr.update(value=""), *[gr.update() for _ in range(38)], "Please enter a preset name or select a preset to overwrite"
 
         preset_file = os.path.join(presets_dir, f"{preset_name}.json")
 
@@ -2407,6 +2409,7 @@ def save_preset(preset_name, current_preset,
             "duration_seconds": duration_seconds,
             "enable_multiline_prompts": enable_multiline_prompts,
             "enable_video_extension": enable_video_extension,
+            "dont_auto_combine_video_input": dont_auto_combine_video_input,
             "saved_at": datetime.now().isoformat()
         }
 
@@ -2428,20 +2431,20 @@ def save_preset(preset_name, current_preset,
 
     except Exception as e:
         presets = get_available_presets()
-        return gr.update(choices=presets, value=None), gr.update(value=""), *[gr.update() for _ in range(37)], f"Error saving preset: {e}"
+        return gr.update(choices=presets, value=None), gr.update(value=""), *[gr.update() for _ in range(38)], f"Error saving preset: {e}"
 
 def load_preset(preset_name):
     """Load a preset and return all UI values with robust error handling."""
     try:
         if not preset_name:
-            return [gr.update() for _ in range(37)] + [gr.update(value=None)] + ["No preset selected"]
+            return [gr.update() for _ in range(38)] + [gr.update(value=None)] + ["No preset selected"]
 
         # Use the robust loading system
         preset_data, error_msg = load_preset_safely(preset_name)
 
         if preset_data is None:
             # Loading failed, return error state
-            return [gr.update() for _ in range(37)] + [gr.update(value=None)] + [error_msg]
+            return [gr.update() for _ in range(38)] + [gr.update(value=None)] + [error_msg]
 
         # Save as last used for auto-load (only if loading succeeded)
         try:
@@ -2538,6 +2541,7 @@ def load_preset(preset_name):
             gr.update(value=preset_data["duration_seconds"]),
             gr.update(value=preset_data["enable_multiline_prompts"]),
             gr.update(value=preset_data["enable_video_extension"]),
+            gr.update(value=preset_data.get("dont_auto_combine_video_input", False)),
             gr.update(value=preset_name),  # Update dropdown value
             f"Preset '{preset_name}' loaded successfully!{' Applied optimizations: ' + ', '.join(optimization_messages) if optimization_messages else ''}"
         )
@@ -2545,7 +2549,7 @@ def load_preset(preset_name):
     except Exception as e:
         error_msg = f"Unexpected error loading preset: {e}"
         print(f"[PRESET] {error_msg}")
-        return [gr.update() for _ in range(37)] + [gr.update(value=None)] + [error_msg]
+        return [gr.update() for _ in range(38)] + [gr.update(value=None)] + [error_msg]
 
 def initialize_app_with_auto_load():
     """Initialize app with preset dropdown choices and auto-load last preset or VRAM-based preset."""
@@ -2714,13 +2718,14 @@ def initialize_app_with_auto_load():
             gr.update(),  # duration_seconds
             gr.update(),  # enable_multiline_prompts
             gr.update(),  # enable_video_extension
+            gr.update(),  # dont_auto_combine_video_input
             status_message  # status message
         )
 
     except Exception as e:
         print(f"Warning: Could not initialize app with auto-load: {e}")
         presets = get_available_presets()
-        return gr.update(choices=presets, value=None), *[gr.update() for _ in range(37)], ""
+        return gr.update(choices=presets, value=None), *[gr.update() for _ in range(38)], ""
 
 def initialize_app():
     """Initialize app with preset dropdown choices."""
@@ -2875,6 +2880,7 @@ def process_batch_generation(
     auto_crop_image,
     enable_multiline_prompts,
     enable_video_extension,  # Boolean checkbox from UI (not count)
+    dont_auto_combine_video_input,  # New: Don't auto combine video input
 ):
     """Process batch generation from input folder."""
     global ovi_engine
@@ -3156,6 +3162,7 @@ def process_batch_generation(
                             text_embeddings_cache=None,
                             enable_multiline_prompts=False,  # Already handled at batch level
                             enable_video_extension=enable_video_extension,  # Pass through video extension setting
+                            dont_auto_combine_video_input=dont_auto_combine_video_input,  # Pass through setting
                         )
                         
                         if last_output_path:
@@ -3705,7 +3712,7 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height):
 theme = gr.themes.Soft()
 theme.font = [gr.themes.GoogleFont("Inter"), "Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v5.1 : https://www.patreon.com/posts/140393220")
+    gr.Markdown("# Ovi Pro SECourses Premium App v5.3 : https://www.patreon.com/posts/140393220")
 
     image_to_use = gr.State(value=None)
     input_video_state = gr.State(value=None)  # Store input video path for merging
@@ -3794,6 +3801,11 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                                 label="Enable Video Extension (Last Frame Based)",
                                 value=False,
                                 info="Automatically extend last generated video using each line in prompt as extension (lines < 3 chars skipped). 4 Lines Prompt = 1 base + 3 times extension 20 seconds video. Uses last frame."
+                            )
+                            dont_auto_combine_video_input = gr.Checkbox(
+                                label="Don't auto combine video input",
+                                value=False,
+                                info="When a video is provided as input, use last frame as source but don't auto-combine with generated video."
                             )
 
                         # Video seed, randomize checkbox, disable audio, and save metadata in same row
@@ -4577,7 +4589,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds, auto_crop_image,
             gr.Textbox(value=None, visible=False), gr.Textbox(value=None, visible=False), gr.Textbox(value=None, visible=False),
-            enable_multiline_prompts, enable_video_extension,
+            enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input,
             input_video_state,  # Pass input video path for merging
         ],
         outputs=[output_path],
@@ -4634,7 +4646,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             num_generations, randomize_seed, save_metadata, aspect_ratio, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds, auto_crop_image,
-            enable_multiline_prompts, enable_video_extension,
+            enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input,
         ],
         outputs=[output_path],
     )
@@ -4653,7 +4665,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds,
-            enable_multiline_prompts, enable_video_extension,
+            enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input,
         ],
         outputs=[
             preset_dropdown, preset_name,  # Update dropdown, clear name field
@@ -4666,7 +4678,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds,
-            enable_multiline_prompts, enable_video_extension,
+            enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input,
             gr.Textbox(visible=False)  # status message
         ],
     )
@@ -4684,7 +4696,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds,
-            enable_multiline_prompts, enable_video_extension,
+            enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input,
             preset_dropdown, gr.Textbox(visible=False)  # current preset, status message
         ],
     )
@@ -4703,7 +4715,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds,
-            enable_multiline_prompts, enable_video_extension,
+            enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input,
             preset_dropdown, gr.Textbox(visible=False)  # current preset, status message
         ],
     )
@@ -4730,7 +4742,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds,
-            enable_multiline_prompts, enable_video_extension,
+            enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input,
             gr.Textbox(visible=False)  # status message
         ],
     )
@@ -4987,6 +4999,9 @@ if __name__ == "__main__":
             'save_metadata': True,
             'aspect_ratio': '16:9',
             'clear_all': False,
+            'enable_multiline_prompts': False,
+            'enable_video_extension': False,
+            'dont_auto_combine_video_input': False,
         }
         success = run_generation_subprocess(test_params)
         print(f"[DEBUG] Subprocess test result: {success}")
@@ -5073,6 +5088,9 @@ if __name__ == "__main__":
             'vae_tile_overlap': 8,
             'force_exact_resolution': False,
             'auto_crop_image': True,
+            'enable_multiline_prompts': False,
+            'enable_video_extension': False,
+            'dont_auto_combine_video_input': False,
         }
 
         # Override with test args only (not replace all values)
