@@ -1207,13 +1207,12 @@ def generate_video(
                 if clear_all:
                     # Run this generation in a subprocess for memory cleanup
                     # Pass individual current_prompt to avoid re-parsing all prompts in subprocess
-                    # For video extension main generation, pass full prompt for metadata
-                    gen_prompt = current_prompt
-                    if enable_video_extension and video_extension_count > 0 and prompt_idx == 0:
-                        gen_prompt = text_prompt  # Use full multi-line prompt for main video metadata
+                    # IMPORTANT: Always use current_prompt (individual line) for generation
+                    # The full multi-line prompt is only used for metadata saving
+                    gen_prompt = current_prompt  # Always use individual prompt line for generation
 
                     single_gen_params = {
-                        'text_prompt': gen_prompt,  # Pass appropriate prompt
+                        'text_prompt': gen_prompt,  # Pass individual prompt for generation
                         'image': image_path,
                         'video_frame_height': video_frame_height,
                         'video_frame_width': video_frame_width,
@@ -1306,15 +1305,14 @@ def generate_video(
                         print(f"[GENERATE] Warning: image_path is invalid type {type(image_path)}, setting to None")
                         image_path = None
 
-                    # Use appropriate prompt for generation
-                    gen_prompt = current_prompt
-                    if enable_video_extension and video_extension_count > 0 and prompt_idx == 0:
-                        gen_prompt = text_prompt  # Use full multi-line prompt for main video
+                    # IMPORTANT: Always use current_prompt (individual line) for generation
+                    # The full multi-line prompt is only used for metadata saving
+                    gen_prompt = current_prompt  # Always use individual prompt line for generation
 
                     # Use cancellable generation wrapper for interruptible generation
                     generated_video, generated_audio, _ = generate_with_cancellation_check(
                         ovi_engine.generate,
-                        text_prompt=gen_prompt,  # Use appropriate prompt
+                        text_prompt=gen_prompt,  # Use individual prompt for generation
                         image_path=image_path,
                         video_frame_height_width=[video_frame_height, video_frame_width],
                         seed=current_seed,
@@ -3785,7 +3783,7 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height):
 theme = gr.themes.Soft()
 theme.font = [gr.themes.GoogleFont("Inter"), "Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v5.3 : https://www.patreon.com/posts/140393220")
+    gr.Markdown("# Ovi Pro SECourses Premium App v5.4 : https://www.patreon.com/posts/140393220")
 
     image_to_use = gr.State(value=None)
     input_video_state = gr.State(value=None)  # Store input video path for merging
