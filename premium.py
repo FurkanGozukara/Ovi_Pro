@@ -2622,7 +2622,7 @@ def process_batch_generation(
     duration_seconds,
     auto_crop_image,
     enable_multiline_prompts,
-    video_extension_count,
+    enable_video_extension,  # Boolean checkbox from UI (not count)
 ):
     """Process batch generation from input folder."""
     global ovi_engine
@@ -2857,87 +2857,58 @@ def process_batch_generation(
                         print(f"      [ERROR] Generation failed in subprocess")
                     continue
 
-                    # Original batch generation logic (when clear_all is disabled)
+                # Original batch generation logic (when clear_all is disabled)
+                # Now uses generate_video() to support video extensions
+                if not clear_all:
                     try:
-                        # Use cancellable generation wrapper for interruptible generation
-                        generated_video, generated_audio, _ = generate_with_cancellation_check(
-                        ovi_engine.generate,
-                        text_prompt=current_prompt,
-                        image_path=final_image_path,
-                        video_frame_height_width=[batch_video_height, batch_video_width],  # Use detected dimensions
-                        seed=current_seed,
-                        solver_name=solver_name,
-                        sample_steps=sample_steps,
-                        shift=shift,
-                        video_guidance_scale=video_guidance_scale,
-                        audio_guidance_scale=audio_guidance_scale,
-                        slg_layer=slg_layer,
-                        blocks_to_swap=None,
-                        video_negative_prompt=video_negative_prompt,
-                        audio_negative_prompt=audio_negative_prompt,
-                        delete_text_encoder=delete_text_encoder,
-                        no_block_prep=no_block_prep,
-                        fp8_t5=fp8_t5,
-                        cpu_only_t5=cpu_only_t5,
-                        fp8_base_model=fp8_base_model,
-                        vae_tiled_decode=vae_tiled_decode,
-                        vae_tile_size=vae_tile_size,
-                        vae_tile_overlap=vae_tile_overlap,
-                    )
-
-                        # Get filename with base_name prefix
-                        output_filename = get_next_filename(outputs_dir, base_filename=base_name)
-                        output_path = os.path.join(outputs_dir, output_filename)
-
-                        # Handle no_audio option
-                        if no_audio:
-                            generated_audio = None
-
-                        save_video(output_path, generated_video, generated_audio, fps=24, sample_rate=16000)
-                        last_output_path = output_path
-
-                        # Save used source image
-                        save_used_source_image(final_image_path, outputs_dir, output_filename)
-
-                        # Save metadata if enabled
-                        if save_metadata:
-                            generation_params = {
-                                'text_prompt': current_prompt,  # Use current prompt for metadata
-                                'image_path': final_image_path,
-                                'video_frame_height': batch_video_height,  # Use actual dimensions used for this image
-                                'video_frame_width': batch_video_width,    # Use actual dimensions used for this image
-                                'aspect_ratio': aspect_ratio,
-                                'randomize_seed': randomize_seed,
-                                'num_generations': num_generations,
-                                'solver_name': solver_name,
-                                'sample_steps': sample_steps,
-                                'shift': shift,
-                                'video_guidance_scale': video_guidance_scale,
-                                'audio_guidance_scale': audio_guidance_scale,
-                                'slg_layer': slg_layer,
-                                'blocks_to_swap': blocks_to_swap,
-                                'cpu_offload': cpu_offload,
-                                'delete_text_encoder': delete_text_encoder,
-                                'fp8_t5': fp8_t5,
-                                'cpu_only_t5': cpu_only_t5,
-                                'fp8_base_model': fp8_base_model,
-                                'no_audio': no_audio,
-                                'no_block_prep': no_block_prep,
-                                'clear_all': clear_all,
-                                'vae_tiled_decode': vae_tiled_decode,
-                                'vae_tile_size': vae_tile_size,
-                                'vae_tile_overlap': vae_tile_overlap,
-                                'base_resolution_width': base_resolution_width,
-                                'base_resolution_height': base_resolution_height,
-                                'duration_seconds': duration_seconds,
-                                'video_negative_prompt': video_negative_prompt,
-                                'audio_negative_prompt': audio_negative_prompt,
-                                'is_batch': True
-                            }
-                            save_generation_metadata(output_path, generation_params, current_seed)
-
-                        print(f"      [SUCCESS] Saved to: {output_path}")
-                        processed_count += 1
+                        # Call generate_video() which handles everything including video extensions
+                        last_output_path = generate_video(
+                            text_prompt=current_prompt,
+                            image=final_image_path,
+                            video_frame_height=batch_video_height,
+                            video_frame_width=batch_video_width,
+                            video_seed=current_seed,
+                            solver_name=solver_name,
+                            sample_steps=sample_steps,
+                            shift=shift,
+                            video_guidance_scale=video_guidance_scale,
+                            audio_guidance_scale=audio_guidance_scale,
+                            slg_layer=slg_layer,
+                            blocks_to_swap=blocks_to_swap,
+                            video_negative_prompt=video_negative_prompt,
+                            audio_negative_prompt=audio_negative_prompt,
+                            use_image_gen=False,
+                            cpu_offload=cpu_offload,
+                            delete_text_encoder=delete_text_encoder,
+                            fp8_t5=fp8_t5,
+                            cpu_only_t5=cpu_only_t5,
+                            fp8_base_model=fp8_base_model,
+                            no_audio=no_audio,
+                            no_block_prep=no_block_prep,
+                            num_generations=1,  # Generate one at a time in batch mode
+                            randomize_seed=False,  # Seed already set above
+                            save_metadata=save_metadata,
+                            aspect_ratio=aspect_ratio,
+                            clear_all=False,  # We're already in non-clear_all mode
+                            vae_tiled_decode=vae_tiled_decode,
+                            vae_tile_size=vae_tile_size,
+                            vae_tile_overlap=vae_tile_overlap,
+                            base_resolution_width=base_resolution_width,
+                            base_resolution_height=base_resolution_height,
+                            duration_seconds=duration_seconds,
+                            auto_crop_image=False,  # Image already cropped
+                            base_filename=current_base_name,  # Use batch-specific filename
+                            output_dir=outputs_dir,
+                            text_embeddings_cache=None,
+                            enable_multiline_prompts=False,  # Already handled at batch level
+                            enable_video_extension=enable_video_extension,  # Pass through video extension setting
+                        )
+                        
+                        if last_output_path:
+                            print(f"      [SUCCESS] Saved to: {last_output_path}")
+                            processed_count += 1
+                        else:
+                            print(f"      [WARNING] Generation returned no output path")
 
                     except Exception as e:
                         print(f"      [ERROR] Generation failed: {e}")
@@ -3414,7 +3385,7 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height):
 theme = gr.themes.Soft()
 theme.font = [gr.themes.GoogleFont("Inter"), "Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v4.5 : https://www.patreon.com/posts/140393220")
+    gr.Markdown("# Ovi Pro SECourses Premium App v4.9 : https://www.patreon.com/posts/140393220")
 
     image_to_use = gr.State(value=None)
 
