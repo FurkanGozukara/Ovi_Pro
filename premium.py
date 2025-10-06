@@ -657,10 +657,10 @@ def generate_video(
     output_dir=None,  # Custom output directory (overrides args.output_dir)
     text_embeddings_cache=None,  # Pre-encoded text embeddings from T5 subprocess
     enable_multiline_prompts=False,  # New: Enable multi-line prompt processing
-    video_extension_count=0,  # New: Number of extension generations (auto-enables when > 0)
+    enable_video_extension=False,  # New: Enable automatic video extension based on prompt lines
 ):
-    # If video_extension_count is 0, try to load it from the last used preset
-    if video_extension_count == 0:
+    # If enable_video_extension is False, try to load it from the last used preset
+    if not enable_video_extension:
         try:
             presets_dir = get_presets_dir()
             last_used_file = os.path.join(presets_dir, "last_used.txt")
@@ -673,9 +673,19 @@ def generate_video(
                         import json
                         with open(preset_file, 'r', encoding='utf-8') as f:
                             preset_data = json.load(f)
-                        video_extension_count = preset_data.get('video_extension_count', 0)
+                        enable_video_extension = preset_data.get('enable_video_extension', False)
         except Exception as e:
             pass
+
+    # Parse prompts for video extension validation (always parse to count lines)
+    validation_prompts = parse_multiline_prompts(text_prompt, True)  # Always parse for validation
+
+    # Calculate video extension count based on enable_video_extension setting
+    video_extension_count = 0
+    if enable_video_extension:
+        # Count valid prompt lines (>= 3 chars after trim) minus 1 for the main video
+        video_extension_count = max(0, len(validation_prompts) - 1)
+
     global ovi_engine
 
     # Reset cancellation flag at the start of each generation request
@@ -733,11 +743,6 @@ def generate_video(
                 print(f"[RESOLUTION FIX] Recalculated resolution from base {base_width}x{base_height} and aspect {ratio_name}: {recalc_width}x{recalc_height} (was {video_frame_width}x{video_frame_height})")
                 video_frame_width, video_frame_height = recalc_width, recalc_height
 
-    # For video extension validation, always parse lines to count them
-    validation_prompts = parse_multiline_prompts(text_prompt, True)  # Always parse for validation
-
-    # Auto-extension logic removed - users now have explicit manual control with Video Extension Count
-
     # Validate video extension requirements
     if video_extension_count > 0:
         required_prompts = 1 + video_extension_count  # 1 main + N extensions
@@ -745,7 +750,11 @@ def generate_video(
             raise ValueError(f"Video Extension Count {video_extension_count} requires at least {required_prompts} valid prompt lines (1 main + {video_extension_count} extensions), but only {len(validation_prompts)} valid lines found in the prompt text.")
 
     # Parse multi-line prompts for generation based on setting
-    individual_prompts = parse_multiline_prompts(text_prompt, enable_multiline_prompts)
+    # When video extension is enabled, only use the first prompt for the main generation
+    if enable_video_extension and video_extension_count > 0:
+        individual_prompts = [validation_prompts[0]]  # Only first prompt for main generation
+    else:
+        individual_prompts = parse_multiline_prompts(text_prompt, enable_multiline_prompts)
 
     # Debug: Log current generation parameters
     print("=" * 80)
@@ -907,8 +916,9 @@ def generate_video(
 
                 if clear_all:
                     # Run this generation in a subprocess for memory cleanup
+                    # Always pass the original text_prompt so subprocess can handle parsing logic correctly
                     single_gen_params = {
-                        'text_prompt': current_prompt,  # Use current prompt from multi-line parsing
+                        'text_prompt': text_prompt,  # Always pass original text_prompt for proper parsing
                         'image': image_path,
                         'video_frame_height': video_frame_height,
                         'video_frame_width': video_frame_width,
@@ -928,43 +938,58 @@ def generate_video(
                         'fp8_t5': fp8_t5,
                         'cpu_only_t5': cpu_only_t5,
                         'fp8_base_model': fp8_base_model,
-                            'no_audio': no_audio,
-                            'no_block_prep': no_block_prep,
-                            'num_generations': 1,  # Always 1 for subprocess
-                            'randomize_seed': False,  # Seed handled above
-                            'save_metadata': save_metadata,
-                            'aspect_ratio': aspect_ratio,
-                            'clear_all': False,  # Disable subprocess in subprocess
-                            'vae_tiled_decode': vae_tiled_decode,
-                            'vae_tile_size': vae_tile_size,
-                            'vae_tile_overlap': vae_tile_overlap,
-                            'base_resolution_width': base_resolution_width,
-                            'base_resolution_height': base_resolution_height,
-                            'duration_seconds': duration_seconds,
-                            'auto_crop_image': auto_crop_image,
-                            'base_filename': base_filename,  # Pass base filename for batch processing
-                            'output_dir': outputs_dir,  # Pass output directory to subprocess
-                            'text_embeddings_cache': text_embeddings_cache,  # Pass pre-encoded embeddings if available
-                            'enable_multiline_prompts': False,  # Disable in subprocess
-                            'video_extension_count': video_extension_count,  # Pass through extension count
+                        'no_audio': no_audio,
+                        'no_block_prep': no_block_prep,
+                        'num_generations': 1,  # Always 1 for subprocess
+                        'randomize_seed': False,  # Seed handled above
+                        'save_metadata': save_metadata,
+                        'aspect_ratio': aspect_ratio,
+                        'clear_all': False,  # Disable subprocess in subprocess
+                        'vae_tiled_decode': vae_tiled_decode,
+                        'vae_tile_size': vae_tile_size,
+                        'vae_tile_overlap': vae_tile_overlap,
+                        'base_resolution_width': base_resolution_width,
+                        'base_resolution_height': base_resolution_height,
+                        'duration_seconds': duration_seconds,
+                        'auto_crop_image': auto_crop_image,
+                        'base_filename': base_filename,  # Pass base filename for batch processing
+                        'output_dir': outputs_dir,  # Pass output directory to subprocess
+                        'text_embeddings_cache': text_embeddings_cache,  # Pass pre-encoded embeddings if available
+                        'enable_multiline_prompts': enable_multiline_prompts,  # Use same setting as main process
+                        'enable_video_extension': enable_video_extension,  # Pass through extension setting
                     }
+
 
                     run_generation_subprocess(single_gen_params)
 
                     # Find the generated file (should be the most recent in the outputs directory)
                     import glob
+                    import time
+
                     # Construct pattern based on base_filename if provided, otherwise use default
                     if base_filename:
                         pattern = os.path.join(outputs_dir, f"{base_filename}_*.mp4")
                     else:
-                        pattern = os.path.join(outputs_dir, "ovi_generation_*.mp4")
-                    existing_files = glob.glob(pattern)
-                    if existing_files:
-                        output_path = max(existing_files, key=os.path.getctime)
+                        pattern = os.path.join(outputs_dir, "*.mp4")
+
+                    # Retry a few times in case of timing issues
+                    output_path = None
+                    for retry in range(5):  # Try up to 5 times
+                        existing_files = glob.glob(pattern)
+                        if existing_files:
+                            # Filter files that are at least 1 second old to avoid partially written files
+                            current_time = time.time()
+                            valid_files = [f for f in existing_files if (current_time - os.path.getctime(f)) > 1.0]
+                            if valid_files:
+                                output_path = max(valid_files, key=os.path.getctime)
+                                break
+                        time.sleep(0.5)  # Wait 0.5 seconds between retries
+
+                    if output_path:
                         last_output_path = output_path
                         print(f"[GENERATION {gen_idx + 1}/{int(num_generations)}] Completed: {os.path.basename(output_path)}")
                     else:
-                        print(f"[GENERATION {gen_idx + 1}/{int(num_generations)}] No output file found in {outputs_dir}")
+                        print(f"[GENERATION {gen_idx + 1}/{int(num_generations)}] No output file found in {outputs_dir} after retries")
                         continue
 
                 # Original generation logic (when clear_all is disabled)
@@ -1084,8 +1109,8 @@ def generate_video(
 
                     print(f"[GENERATION {gen_idx + 1}/{int(num_generations)}] Saved to: {output_path}")
 
-                    # Handle video extensions if enabled (skip when clear_all=True since subprocess handles it)
-                    if video_extension_count > 0 and not clear_all:
+                    # Handle video extensions if enabled
+                    if video_extension_count > 0:
                         print(f"[VIDEO EXTENSION] Starting {video_extension_count} extensions for prompt {prompt_idx + 1}")
 
                         extension_videos = [output_path]  # Start with the main video
@@ -1163,24 +1188,37 @@ def generate_video(
                                         'output_dir': outputs_dir,
                                         'text_embeddings_cache': text_embeddings_cache,
                                         'enable_multiline_prompts': False,
-                                        'video_extension_count': 0,
+                                        'enable_video_extension': False,
                                     }
 
                                     run_generation_subprocess(ext_params)
 
                                     # Find the generated extension file and rename it
                                     import glob
-                                    pattern = os.path.join(outputs_dir, "ovi_generation_*.mp4")
-                                    existing_files = glob.glob(pattern)
-                                    if existing_files:
-                                        generated_file = max(existing_files, key=os.path.getctime)
+                                    import time
+                                    pattern = os.path.join(outputs_dir, "*.mp4")
+
+                                    # Retry a few times in case of timing issues
+                                    generated_file = None
+                                    for retry in range(5):  # Try up to 5 times
+                                        existing_files = glob.glob(pattern)
+                                        if existing_files:
+                                            # Filter files that are at least 1 second old to avoid partially written files
+                                            current_time = time.time()
+                                            valid_files = [f for f in existing_files if (current_time - os.path.getctime(f)) > 1.0]
+                                            if valid_files:
+                                                generated_file = max(valid_files, key=os.path.getctime)
+                                                break
+                                        time.sleep(0.5)  # Wait 0.5 seconds between retries
+
+                                    if generated_file:
                                         # Rename to desired extension filename
                                         os.rename(generated_file, ext_output_path)
                                         extension_videos.append(ext_output_path)
                                         current_image_path = extract_last_frame(ext_output_path)  # Extract for next extension
                                         print(f"[VIDEO EXTENSION] Extension {ext_idx + 1} saved: {ext_filename}")
                                     else:
-                                        print(f"[VIDEO EXTENSION] Warning: Extension {ext_idx + 1} file not found")
+                                        print(f"[VIDEO EXTENSION] Warning: Extension {ext_idx + 1} file not found after retries")
                                         break
                                 else:
                                     # Safety check: ensure ovi_engine is initialized
@@ -1675,11 +1713,14 @@ def get_next_filename(outputs_dir, base_filename=None):
         # For batch processing, use the base filename (e.g., 'image1' -> 'image1_0001.mp4')
         stem = base_filename
     else:
-        # For regular generation, use 'ovi_generation'
-        stem = "ovi_generation"
+        # For regular generation, use sequential numbering without prefix
+        stem = ""
 
     # Find all files matching the pattern
-    pattern = os.path.join(outputs_dir, f"{stem}_*.mp4")
+    if stem:
+        pattern = os.path.join(outputs_dir, f"{stem}_*.mp4")
+    else:
+        pattern = os.path.join(outputs_dir, "*.mp4")
     existing_files = glob.glob(pattern)
 
     # Extract numbers from existing files
@@ -1687,14 +1728,24 @@ def get_next_filename(outputs_dir, base_filename=None):
     for file_path in existing_files:
         filename = os.path.basename(file_path)
         # Remove stem and extension to get the number part
-        if filename.startswith(f"{stem}_") and filename.endswith(".mp4"):
-            num_part = filename[len(f"{stem}_"):-4]  # Remove stem_ and .mp4
-            # Only consider 4-digit numbers (our sequential format)
-            if len(num_part) == 4 and num_part.isdigit():
-                try:
-                    numbers.append(int(num_part))
-                except ValueError:
-                    pass
+        if stem:
+            if filename.startswith(f"{stem}_") and filename.endswith(".mp4"):
+                num_part = filename[len(f"{stem}_"):-4]  # Remove stem_ and .mp4
+                # Only consider 4-digit numbers (our sequential format)
+                if len(num_part) == 4 and num_part.isdigit():
+                    try:
+                        numbers.append(int(num_part))
+                    except ValueError:
+                        pass
+        else:
+            # For regular generation without stem, look for files like 0001.mp4
+            if filename.endswith(".mp4") and len(filename) == 8:  # 0001.mp4 is 8 chars
+                num_part = filename[:-4]  # Remove .mp4
+                if len(num_part) == 4 and num_part.isdigit():
+                    try:
+                        numbers.append(int(num_part))
+                    except ValueError:
+                        pass
 
     # Find the next available number
     next_num = 1
@@ -1702,7 +1753,10 @@ def get_next_filename(outputs_dir, base_filename=None):
         next_num = max(numbers) + 1
 
     # Format as 4-digit number
-    return f"{stem}_{next_num:04d}.mp4"
+    if stem:
+        return f"{stem}_{next_num:04d}.mp4"
+    else:
+        return f"{next_num:04d}.mp4"
 
 def cancel_all_generations():
     """Cancel all running generations by setting the global flag."""
@@ -1825,7 +1879,7 @@ PRESET_DEFAULTS = {
     "base_resolution_height": 720,
     "duration_seconds": 5,
     "enable_multiline_prompts": False,
-    "video_extension_count": 0,
+    "enable_video_extension": False,
 }
 
 # Parameter validation rules
@@ -2053,7 +2107,7 @@ def save_preset(preset_name, current_preset,
                 batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
                 vae_tiled_decode, vae_tile_size, vae_tile_overlap,
                 base_resolution_width, base_resolution_height, duration_seconds,
-                enable_multiline_prompts, video_extension_count):
+                enable_multiline_prompts, enable_video_extension):
     """Save current UI state as a preset."""
     try:
         presets_dir = get_presets_dir()
@@ -2106,7 +2160,7 @@ def save_preset(preset_name, current_preset,
             "base_resolution_height": base_resolution_height,
             "duration_seconds": duration_seconds,
             "enable_multiline_prompts": enable_multiline_prompts,
-            "video_extension_count": video_extension_count,
+            "enable_video_extension": enable_video_extension,
             "saved_at": datetime.now().isoformat()
         }
 
@@ -2236,7 +2290,7 @@ def load_preset(preset_name):
             gr.update(value=preset_data["base_resolution_height"]),
             gr.update(value=preset_data["duration_seconds"]),
             gr.update(value=preset_data["enable_multiline_prompts"]),
-            gr.update(value=preset_data["video_extension_count"]),
+            gr.update(value=preset_data["enable_video_extension"]),
             gr.update(value=preset_name),  # Update dropdown value
             f"Preset '{preset_name}' loaded successfully!{' Applied optimizations: ' + ', '.join(optimization_messages) if optimization_messages else ''}"
         )
@@ -2411,7 +2465,7 @@ def initialize_app_with_auto_load():
             gr.update(),  # base_resolution_height
             gr.update(),  # duration_seconds
             gr.update(),  # enable_multiline_prompts
-            gr.update(),  # video_extension_count
+            gr.update(),  # enable_video_extension
             status_message  # status message
         )
 
@@ -2779,7 +2833,7 @@ def process_batch_generation(
                         'base_filename': base_name,  # Use base name for batch processing
                         'output_dir': outputs_dir,  # Pass output directory to subprocess
                         'enable_multiline_prompts': False,  # Disable in subprocess
-                        'video_extension_count': video_extension_count,  # Pass through extension count
+                        'enable_video_extension': enable_video_extension,  # Pass through extension setting
                     }
 
                     success = run_generation_subprocess(single_gen_params)
@@ -3570,14 +3624,10 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
                                 value=False,
                                 info="Each line in the prompt becomes a separate generation (lines < 4 chars are skipped)"
                             )
-                            video_extension_count = gr.Number(
-                                minimum=0,
-                                maximum=10,
-                                value=0,
-                                step=1,
-                                label="Video Extension Count",
-                                precision=0,
-                                info="Number of extension generations using last frame as input (0 = disabled)"
+                            enable_video_extension = gr.Checkbox(
+                                label="Enable Video Extension",
+                                value=False,
+                                info="Automatically extend video using each line in prompt as extension (lines < 3 chars skipped)"
                             )
 
                         # Negative prompts in same row, 3 lines each
@@ -4213,7 +4263,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             num_generations, randomize_seed, save_metadata, aspect_ratio, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds, auto_crop_image,
-            enable_multiline_prompts, video_extension_count,
+            enable_multiline_prompts, enable_video_extension,
         ],
         outputs=[output_path],
     )
@@ -4269,7 +4319,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             num_generations, randomize_seed, save_metadata, aspect_ratio, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds, auto_crop_image,
-            enable_multiline_prompts, video_extension_count,
+            enable_multiline_prompts, enable_video_extension,
         ],
         outputs=[output_path],
     )
@@ -4288,7 +4338,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds,
-            enable_multiline_prompts, video_extension_count,
+            enable_multiline_prompts, enable_video_extension,
         ],
         outputs=[
             preset_dropdown, preset_name,  # Update dropdown, clear name field
@@ -4301,7 +4351,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds,
-            enable_multiline_prompts, video_extension_count,
+            enable_multiline_prompts, enable_video_extension,
             gr.Textbox(visible=False)  # status message
         ],
     )
@@ -4319,7 +4369,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds,
-            enable_multiline_prompts, video_extension_count,
+            enable_multiline_prompts, enable_video_extension,
             preset_dropdown, gr.Textbox(visible=False)  # current preset, status message
         ],
     )
@@ -4338,7 +4388,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds,
-            enable_multiline_prompts, video_extension_count,
+            enable_multiline_prompts, enable_video_extension,
             preset_dropdown, gr.Textbox(visible=False)  # current preset, status message
         ],
     )
@@ -4365,7 +4415,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as dem
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds,
-            enable_multiline_prompts, video_extension_count,
+            enable_multiline_prompts, enable_video_extension,
             gr.Textbox(visible=False)  # status message
         ],
     )
@@ -4422,8 +4472,8 @@ def run_comprehensive_test():
     # Test 3: Video processing functions
     print("\n[TEST 3] Video processing functions")
     import os
-    if os.path.exists("outputs/ovi_generation_0001.mp4"):
-        frame_path = extract_last_frame("outputs/ovi_generation_0001.mp4")
+    if os.path.exists("outputs/0001.mp4"):
+        frame_path = extract_last_frame("outputs/0001.mp4")
         if frame_path and os.path.exists(frame_path):
             print(f"✓ Frame extraction successful: {frame_path}")
         else:
@@ -4457,6 +4507,13 @@ def run_single_generation_from_file(json_file_path):
         print(f"[SINGLE-GEN] Loaded params from file: {json_file_path}")
         print(f"[SINGLE-GEN] Starting generation with params: {list(params.keys())}")
         print(f"[SINGLE-GEN] Text prompt: {params.get('text_prompt', 'N/A')[:50]}...")
+
+        # Auto-enable video extension if prompt has multiple lines and not explicitly disabled
+        text_prompt = params.get('text_prompt', '')
+        validation_prompts = parse_multiline_prompts(text_prompt, True)
+        if len(validation_prompts) > 1 and not params.get('enable_video_extension', False):
+            print(f"[SINGLE-GEN] Auto-enabling video extension (detected {len(validation_prompts)} prompt lines)")
+            params['enable_video_extension'] = True
 
         # Run the generation with the provided parameters
         result = generate_video(**params)

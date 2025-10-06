@@ -35,6 +35,6 @@
   "base_resolution_height": 720,
   "duration_seconds": 5,
   "enable_multiline_prompts": false,
-  "video_extension_count": 2,
+  "enable_video_extension": true,
   "saved_at": "2025-10-06T00:50:51.245915"
 }
