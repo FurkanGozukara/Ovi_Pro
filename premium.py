@@ -593,8 +593,90 @@ def process_input_media(media_path, auto_crop_image, video_width, video_height):
         traceback.print_exc()
         return None, None, False
 
-def combine_videos(video_paths, output_path):
-    """Combine multiple videos into one by concatenating them with FFmpeg."""
+def trim_last_frame_from_video(input_video_path, output_video_path):
+    """Remove the last frame from a video using FFmpeg.
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        import subprocess
+        import cv2
+        
+        # Get video properties
+        cap = cv2.VideoCapture(input_video_path)
+        if not cap.isOpened():
+            print(f"[TRIM] Could not open video: {input_video_path}")
+            return False
+        
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        
+        if total_frames <= 1:
+            print(f"[TRIM] Video has only {total_frames} frame(s), cannot trim")
+            return False
+        
+        # Calculate frames to keep (remove last frame)
+        frames_to_keep = total_frames - 1
+
+        print(f"[TRIM] Original video: {total_frames} frames at {fps:.2f} fps")
+        print(f"[TRIM] Trimming to: {frames_to_keep} frames")
+
+        # Use FFmpeg to trim the video by specifying exact frame count for frame accuracy
+        # Note: We re-encode to ensure exact frame trimming (can't rely on keyframes with -c copy)
+        cmd = [
+            'ffmpeg', '-y',
+            '-i', input_video_path,
+            '-frames:v', str(frames_to_keep),  # Keep exactly this many frames
+            '-c:v', 'libx264',  # Re-encode video for frame-accurate trim
+            '-preset', 'slow',  # Fast encoding preset
+            '-crf', '12',  # High quality (18 is visually lossless)
+            '-c:a', 'aac',  # Re-encode audio
+            '-b:a', '192k',  # Audio bitrate
+            '-avoid_negative_ts', 'make_zero',
+            output_video_path
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode == 0:
+            # Verify the trim worked by checking frame count
+            cap_verify = cv2.VideoCapture(output_video_path)
+            if cap_verify.isOpened():
+                new_frame_count = int(cap_verify.get(cv2.CAP_PROP_FRAME_COUNT))
+                cap_verify.release()
+                print(f"[TRIM] Successfully trimmed: {total_frames} → {new_frame_count} frames")
+                
+                if new_frame_count == frames_to_keep:
+                    print(f"[TRIM] ✓ Frame count verified: exactly 1 frame removed")
+                    return True
+                else:
+                    print(f"[TRIM] ⚠ Warning: Expected {frames_to_keep} frames, got {new_frame_count}")
+                    # Still return True as trim succeeded, just with a warning
+                    return True
+            else:
+                print(f"[TRIM] Successfully trimmed last frame (verification failed)")
+                return True
+        else:
+            print(f"[TRIM] FFmpeg failed with return code {result.returncode}")
+            print(f"[TRIM] stderr: {result.stderr}")
+            return False
+            
+    except Exception as e:
+        print(f"[TRIM] Error trimming video: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def combine_videos(video_paths, output_path, trim_first_video_last_frame=False):
+    """Combine multiple videos into one by concatenating them with FFmpeg.
+    
+    Args:
+        video_paths: List of video file paths to combine
+        output_path: Output path for combined video
+        trim_first_video_last_frame: If True, removes last frame from first video before merging
+    """
     try:
         import subprocess
         import tempfile
@@ -603,6 +685,20 @@ def combine_videos(video_paths, output_path):
         if len(video_paths) < 2:
             print("[VIDEO EXTENSION] Only one video, no combination needed")
             return False
+
+        # If trimming first video, create a trimmed version
+        temp_trimmed_video = None
+        if trim_first_video_last_frame:
+            print(f"[VIDEO MERGE] Trimming last frame from first video to avoid duplication...")
+            temp_trimmed_video = tempfile.mktemp(suffix='_trimmed.mp4', dir=os.path.dirname(video_paths[0]))
+            
+            if trim_last_frame_from_video(video_paths[0], temp_trimmed_video):
+                # Replace first video with trimmed version
+                video_paths = [temp_trimmed_video] + video_paths[1:]
+                print(f"[VIDEO MERGE] Using trimmed video (last frame removed)")
+            else:
+                print(f"[VIDEO MERGE] Failed to trim, using original video")
+                temp_trimmed_video = None
 
         # Create a temporary file list for FFmpeg concat
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
@@ -635,9 +731,11 @@ def combine_videos(video_paths, output_path):
                 return False
 
         finally:
-            # Clean up temporary file
+            # Clean up temporary files
             try:
                 os.unlink(concat_file)
+                if temp_trimmed_video and os.path.exists(temp_trimmed_video):
+                    os.unlink(temp_trimmed_video)
             except:
                 pass
 
@@ -1422,8 +1520,8 @@ def generate_video(
                 merged_filename = f"{base_name}_merged_{counter}.mp4"
                 merged_path = os.path.join(outputs_dir, merged_filename)
 
-            # Merge input video + generated video
-            if combine_videos([input_video_path, last_output_path], merged_path):
+            # Merge input video + generated video (trim last frame from input to avoid duplication)
+            if combine_videos([input_video_path, last_output_path], merged_path, trim_first_video_last_frame=True):
                 print(f"[INPUT VIDEO MERGE] Merged video saved: {merged_filename}")
                 last_output_path = merged_path
             else:
