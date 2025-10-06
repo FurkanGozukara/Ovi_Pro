@@ -890,6 +890,7 @@ def generate_video(
     enable_multiline_prompts=False,  # New: Enable multi-line prompt processing
     enable_video_extension=False,  # New: Enable automatic video extension based on prompt lines
     input_video_path=None,  # New: Input video path for merging (when user uploads video)
+    is_video_extension_subprocess=False,  # Internal: Mark subprocess calls for video extensions
 ):
     # Note: enable_video_extension is passed directly from UI and should be respected as-is
 
@@ -1142,8 +1143,13 @@ def generate_video(
                 if clear_all:
                     # Run this generation in a subprocess for memory cleanup
                     # Pass individual current_prompt to avoid re-parsing all prompts in subprocess
+                    # For video extension main generation, pass full prompt for metadata
+                    gen_prompt = current_prompt
+                    if enable_video_extension and video_extension_count > 0 and prompt_idx == 0:
+                        gen_prompt = text_prompt  # Use full multi-line prompt for main video metadata
+
                     single_gen_params = {
-                        'text_prompt': current_prompt,  # Pass individual prompt to avoid re-parsing
+                        'text_prompt': gen_prompt,  # Pass appropriate prompt
                         'image': image_path,
                         'video_frame_height': video_frame_height,
                         'video_frame_width': video_frame_width,
@@ -1235,10 +1241,15 @@ def generate_video(
                         print(f"[GENERATE] Warning: image_path is invalid type {type(image_path)}, setting to None")
                         image_path = None
 
+                    # Use appropriate prompt for generation
+                    gen_prompt = current_prompt
+                    if enable_video_extension and video_extension_count > 0 and prompt_idx == 0:
+                        gen_prompt = text_prompt  # Use full multi-line prompt for main video
+
                     # Use cancellable generation wrapper for interruptible generation
                     generated_video, generated_audio, _ = generate_with_cancellation_check(
                         ovi_engine.generate,
-                        text_prompt=current_prompt,  # Use current prompt from multi-line parsing
+                        text_prompt=gen_prompt,  # Use appropriate prompt
                         image_path=image_path,
                         video_frame_height_width=[video_frame_height, video_frame_width],
                         seed=current_seed,
@@ -1296,9 +1307,16 @@ def generate_video(
                     save_used_source_image(image_path, outputs_dir, output_filename)
 
                     # Save metadata if enabled
-                    if save_metadata:
+                    # Skip metadata saving for extension subprocesses
+                    is_extension_subprocess = locals().get('is_video_extension_subprocess', False)
+                    if save_metadata and not is_extension_subprocess:
+                        # For video extension, use full multi-line prompt for first/main video metadata
+                        metadata_prompt = current_prompt
+                        if enable_video_extension and video_extension_count > 0 and prompt_idx == 0:
+                            metadata_prompt = text_prompt  # Use full multi-line prompt for main video
+
                         generation_params = {
-                            'text_prompt': current_prompt,  # Use current prompt for metadata
+                            'text_prompt': metadata_prompt,  # Use appropriate prompt for metadata
                             'image_path': image_path,
                             'video_frame_height': video_frame_height,
                             'video_frame_width': video_frame_width,
@@ -1399,7 +1417,7 @@ def generate_video(
                                     'no_block_prep': no_block_prep,
                                     'num_generations': 1,
                                     'randomize_seed': False,
-                                    'save_metadata': save_metadata,
+                                    'save_metadata': False,  # Extensions don't save individual metadata
                                     'aspect_ratio': aspect_ratio,
                                     'clear_all': False,
                                     'vae_tiled_decode': vae_tiled_decode,
@@ -1414,6 +1432,7 @@ def generate_video(
                                     'text_embeddings_cache': text_embeddings_cache,
                                     'enable_multiline_prompts': False,
                                     'enable_video_extension': False,
+                                    'is_video_extension_subprocess': True,  # Mark as extension subprocess
                                 }
 
                                 run_generation_subprocess(ext_params)
@@ -1502,44 +1521,7 @@ def generate_video(
 
                                 current_image_path = extract_last_frame(ext_output_path)  # Extract for next extension
 
-                                # Save metadata for extension
-                                if save_metadata:
-                                    ext_generation_params = {
-                                        'text_prompt': extension_prompt,
-                                        'image_path': current_image_path,
-                                        'video_frame_height': video_frame_height,
-                                        'video_frame_width': video_frame_width,
-                                        'aspect_ratio': aspect_ratio,
-                                        'randomize_seed': False,
-                                        'num_generations': 1,
-                                        'solver_name': solver_name,
-                                        'sample_steps': sample_steps,
-                                        'shift': shift,
-                                        'video_guidance_scale': video_guidance_scale,
-                                        'audio_guidance_scale': audio_guidance_scale,
-                                        'slg_layer': slg_layer,
-                                        'blocks_to_swap': blocks_to_swap,
-                                        'cpu_offload': cpu_offload,
-                                        'delete_text_encoder': delete_text_encoder,
-                                        'fp8_t5': fp8_t5,
-                                        'cpu_only_t5': cpu_only_t5,
-                                        'fp8_base_model': fp8_base_model,
-                                        'no_audio': no_audio,
-                                        'no_block_prep': no_block_prep,
-                                        'clear_all': clear_all,
-                                        'vae_tiled_decode': vae_tiled_decode,
-                                        'vae_tile_size': vae_tile_size,
-                                        'vae_tile_overlap': vae_tile_overlap,
-                                        'base_resolution_width': base_resolution_width,
-                                        'base_resolution_height': base_resolution_height,
-                                        'duration_seconds': duration_seconds,
-                                        'video_negative_prompt': video_negative_prompt,
-                                        'audio_negative_prompt': audio_negative_prompt,
-                                        'is_batch': False,
-                                        'is_extension': True,
-                                        'extension_index': ext_idx + 1,
-                                    }
-                                    save_generation_metadata(ext_output_path, ext_generation_params, current_seed)
+                                # Note: Extensions don't save individual metadata - only main video has metadata
 
                                 print(f"[VIDEO EXTENSION] Extension {ext_idx + 1} saved: {ext_filename}")
 
@@ -3712,7 +3694,7 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height):
 theme = gr.themes.Soft()
 theme.font = [gr.themes.GoogleFont("Inter"), "Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=gr.themes.Soft(), title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v4.9 : https://www.patreon.com/posts/140393220")
+    gr.Markdown("# Ovi Pro SECourses Premium App v5.0 : https://www.patreon.com/posts/140393220")
 
     image_to_use = gr.State(value=None)
     input_video_state = gr.State(value=None)  # Store input video path for merging
