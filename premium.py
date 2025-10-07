@@ -2240,11 +2240,14 @@ def scan_lora_folders():
 def refresh_lora_list():
     """Refresh LoRA file list and return updated choices"""
     choices, lora_path_map = scan_lora_folders()
-    # Return 12 values: 4 dropdowns, 4 scales, 4 layer dropdowns
-    dropdowns = [gr.Dropdown(choices=choices, value="None") for _ in range(4)]
-    scales = [gr.Number(value=1.0) for _ in range(4)]
-    layers = [gr.Dropdown(choices=["Video Layers", "Sound Layers", "Both"], value="Video Layers") for _ in range(4)]
-    return dropdowns + scales + layers
+    # Return 12 values in correct order: dropdown1, scale1, layers1, dropdown2, scale2, layers2, etc.
+    # Update dropdowns with new choices, keep current values for scales and layers
+    result = []
+    for i in range(4):
+        result.append(gr.update(choices=choices))  # dropdown
+        result.append(gr.update())  # scale (keep current value)
+        result.append(gr.update())  # layers (keep current value)
+    return result
 
 def open_outputs_folder():
     """Open the outputs folder in the system's file explorer."""
@@ -4255,7 +4258,7 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height):
 theme = gr.themes.Soft()
 theme.font = ["Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v6.1 : https://www.patreon.com/posts/140393220")
+    gr.Markdown("# Ovi Pro SECourses Premium App v6.2 : https://www.patreon.com/posts/140393220")
 
     image_to_use = gr.State(value=None)
     input_video_state = gr.State(value=None)  # Store input video path for merging
