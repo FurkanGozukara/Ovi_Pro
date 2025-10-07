@@ -1671,6 +1671,7 @@ def generate_video(
                                     fp8_t5=fp8_t5,
                                     cpu_only_t5=cpu_only_t5,
                                     fp8_base_model=fp8_base_model,
+                                    use_sage_attention=use_sage_attention,
                                     vae_tiled_decode=vae_tiled_decode,
                                     vae_tile_size=vae_tile_size,
                                     vae_tile_overlap=vae_tile_overlap,
@@ -4015,7 +4016,7 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height):
 theme = gr.themes.Soft()
 theme.font = ["Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v5.9 : https://www.patreon.com/posts/140393220")
+    gr.Markdown("# Ovi Pro SECourses Premium App v5.91 : https://www.patreon.com/posts/140393220")
 
     image_to_use = gr.State(value=None)
     input_video_state = gr.State(value=None)  # Store input video path for merging
