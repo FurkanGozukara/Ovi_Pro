@@ -5156,7 +5156,7 @@ with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
             
             # Add featured example at the top
             i2v_examples.insert(0, (
-                "A stylish radio host in a professional studio leans into the microphone, adjusting his sunglasses and gesturing expressively. He says <S>Welcome back to Choice FM, you're listening to the hottest tracks in the city!<E> The camera slowly zooms in as he nods to the beat. <AUDCAP>Warm, confident male voice with professional radio tone, subtle background music, studio ambiance.<ENDAUDCAP>",
+                "A stylish radio host in a professional studio leans into the microphone, adjusting his sunglasses and gesturing expressively. He says <S>Welcome to the SECourses made premium Ovi app.<E> The camera slowly zooms in as he nods to the beat. <AUDCAP>Warm, confident male voice with professional radio tone, subtle background music, studio ambiance.<ENDAUDCAP>",
                 "example_prompts/pngs/5.png"
             ))
 
