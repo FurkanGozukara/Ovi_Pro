@@ -67,6 +67,10 @@ class OviFusionEngine:
         self.vae_tile_size = 32  # Latent space tile size (32 latent = 512 pixels after 16x upscale)
         self.vae_tile_overlap = 8  # Overlap for seamless blending (8 latent = 128 pixels)
         self.vae_tile_temporal = 31  # Process all frames together (no temporal tiling by default)
+        
+        # LoRA Configuration
+        self.current_lora_hash = "none"  # Track current LoRA configuration for smart reload
+        self.lora_specs = []  # List of (lora_path, scale) tuples
 
         # Load VAEs immediately (they're lightweight) - but defer if block swap is enabled
         # Block swap requires special loading sequence, so defer all model loading
@@ -295,6 +299,74 @@ class OviFusionEngine:
         if self.cpu_offload:
             self._offload_vaes_to_cpu()
 
+    def _apply_loras_to_model(self, model, lora_specs):
+        """
+        Apply LoRAs to the fusion model after loading
+        This happens AFTER model is fully loaded but BEFORE any generation/block swapping
+
+        Args:
+            model: Loaded fusion model
+            lora_specs: List of (lora_path, scale, layers) tuples
+        """
+        if not lora_specs:
+            return
+
+        from ovi.utils.lora_utils import merge_multiple_loras
+
+        print("=" * 80)
+        print("APPLYING LORAS TO FUSION MODEL")
+        print(f"  Number of LoRAs: {len(lora_specs)}")
+        for lora_path, scale, layers in lora_specs:
+            print(f"  - {os.path.basename(lora_path)}: scale={scale}, layers={layers}")
+        print("=" * 80)
+
+        # Separate LoRAs by target layers
+        video_loras = []
+        audio_loras = []
+
+        for lora_path, scale, layers in lora_specs:
+            if layers == "Video Layers":
+                video_loras.append((lora_path, scale))
+            elif layers == "Sound Layers":
+                audio_loras.append((lora_path, scale))
+            elif layers == "Both":
+                video_loras.append((lora_path, scale))
+                audio_loras.append((lora_path, scale))
+
+        # Merge LoRAs into video model
+        stats_video = {'matched_layers': 0, 'total_loras': 0}
+        if model.video_model is not None and video_loras:
+            print(f"\n[VIDEO MODEL] Merging {len(video_loras)} LoRA(s)...")
+            stats_video = merge_multiple_loras(
+                model.video_model,
+                video_loras,
+                model_dtype=self.target_dtype,
+                device='cpu'  # Merge on CPU for memory efficiency
+            )
+            print(f"[VIDEO MODEL] ✓ Merged {stats_video['matched_layers']} layers from {stats_video['total_loras']} LoRAs")
+
+        # Merge LoRAs into audio model
+        stats_audio = {'matched_layers': 0, 'total_loras': 0}
+        if model.audio_model is not None and audio_loras:
+            print(f"\n[AUDIO MODEL] Merging {len(audio_loras)} LoRA(s)...")
+            stats_audio = merge_multiple_loras(
+                model.audio_model,
+                audio_loras,
+                model_dtype=self.target_dtype,
+                device='cpu'  # Merge on CPU for memory efficiency
+            )
+            print(f"[AUDIO MODEL] ✓ Merged {stats_audio['matched_layers']} layers from {stats_audio['total_loras']} LoRAs")
+
+        print("=" * 80)
+        print("LORA MERGING COMPLETE")
+        print(f"  Video model: {stats_video.get('matched_layers', 0)} layers merged from {len(video_loras)} LoRA(s)")
+        print(f"  Audio model: {stats_audio.get('matched_layers', 0)} layers merged from {len(audio_loras)} LoRA(s)")
+        print(f"  Total LoRAs applied: {len(lora_specs)}")
+        print("=" * 80)
+        print("✓ SUCCESS: LoRAs successfully applied to fusion model")
+        print("✓ Model is ready for generation with LoRA modifications")
+        print("=" * 80)
+    
     def _load_models(self, no_block_prep=False, load_text_encoder=True):
         """Lazy load the heavy models on first generation request"""
         if self.model is not None:
@@ -381,8 +453,14 @@ class OviFusionEngine:
         load_fusion_checkpoint(model, checkpoint_path=checkpoint_path, from_meta=meta_init)
         model.set_rope_params()
         
-        # Step 3: Apply FP8 optimization BEFORE dtype conversion!
-        # This ensures FP8 checkpoint loads with correct dtypes
+        # Step 3: Apply LoRAs BEFORE dtype conversion and FP8 optimization!
+        # LoRAs should be merged into bf16 model, then converted to FP8 if needed
+        if self.lora_specs:
+            print("Step 3a/7: Applying LoRAs to model on CPU (before dtype conversion)...")
+            self._apply_loras_to_model(model, self.lora_specs)
+        
+        # Step 3b: Apply FP8 optimization AFTER LoRA merge!
+        # This ensures FP8 checkpoint includes LoRA-merged weights
         if self.fp8_base_model:
             print("=" * 80)
             print("APPLYING FP8 OPTIMIZATION TO FUSION MODEL")
@@ -460,7 +538,8 @@ class OviFusionEngine:
                 print("=" * 80)
         else:
             # No FP8: convert to target dtype normally
-            print(f"Step 3/6: Converting model to {self.target_dtype} on CPU...")
+            step_num = "3b" if self.lora_specs else "3"
+            print(f"Step {step_num}/6: Converting model to {self.target_dtype} on CPU...")
             model = model.to(device="cpu", dtype=self.target_dtype).eval()
         
         if torch.cuda.is_available():
@@ -595,7 +674,9 @@ class OviFusionEngine:
                     vae_tile_overlap=8,
                     force_exact_resolution=False,
                     cancellation_check=None,
-                    text_embeddings_cache=None  # Pre-encoded text embeddings from T5 subprocess
+                    text_embeddings_cache=None,  # Pre-encoded text embeddings from T5 subprocess
+                    lora_specs=None,  # List of (lora_path, scale, layers) tuples for LoRA loading
+                    clear_all=False  # Force model reload (from UI)
                 ):
 
         # ===================================================================
@@ -609,6 +690,60 @@ class OviFusionEngine:
         
         # CRITICAL: Set Fusion Model FP8 configuration BEFORE any loading!
         self.fp8_base_model = fp8_base_model
+        
+        # ===================================================================
+        # LORA SMART RELOAD: Check if LoRA configuration changed
+        # Only reload model if LoRAs changed (or clear_all is enabled)
+        # ===================================================================
+        from ovi.utils.lora_utils import get_lora_hash
+        
+        # Normalize lora_specs
+        if lora_specs is None:
+            lora_specs = []
+        
+        # Filter out None entries and entries with scale=0
+        lora_specs = [(path, scale, layers) for path, scale, layers in lora_specs if path and scale != 0.0]
+        
+        # Calculate new LoRA hash
+        new_lora_hash = get_lora_hash(lora_specs)
+        
+        # Determine if we need to reload the model
+        lora_changed = (new_lora_hash != self.current_lora_hash)
+        need_reload = clear_all or (lora_changed and self.model is not None)
+        
+        if need_reload and self.model is not None:
+            if clear_all:
+                print("=" * 80)
+                print("CLEAR ALL MEMORY: Unloading fusion model for fresh reload")
+                print("=" * 80)
+            elif lora_changed:
+                print("=" * 80)
+                print("LORA CONFIGURATION CHANGED: Reloading model with new LoRAs")
+                print(f"  Previous LoRA hash: {self.current_lora_hash}")
+                print(f"  New LoRA hash: {new_lora_hash}")
+                print("=" * 80)
+            
+            # Unload the model
+            del self.model
+            self.model = None
+            
+            # Force garbage collection
+            import gc
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize(self.device)
+        
+        # Update LoRA configuration
+        self.lora_specs = lora_specs
+        self.current_lora_hash = new_lora_hash
+        
+        if self.lora_specs:
+            print("=" * 80)
+            print(f"LORA CONFIGURATION: {len(self.lora_specs)} LoRA(s) will be applied")
+            for path, scale, layers in self.lora_specs:
+                print(f"  - {os.path.basename(path)}: scale={scale}, layers={layers}")
+            print("=" * 80)
         
         # CRITICAL: Set Sage Attention configuration BEFORE any generation!
         self.use_sage_attention = use_sage_attention

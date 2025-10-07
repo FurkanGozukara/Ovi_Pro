@@ -1052,13 +1052,86 @@ def generate_video(
     enable_video_extension=False,  # New: Enable automatic video extension based on prompt lines
     dont_auto_combine_video_input=False,  # New: Don't auto combine video input with generated video
     input_video_path=None,  # New: Input video path for merging (when user uploads video)
+    lora_1=None, lora_1_scale=1.0, lora_1_layers="Video Layers",  # LoRA 1 selection, scale, and layers
+    lora_2=None, lora_2_scale=1.0, lora_2_layers="Video Layers",  # LoRA 2 selection, scale, and layers
+    lora_3=None, lora_3_scale=1.0, lora_3_layers="Video Layers",  # LoRA 3 selection, scale, and layers
+    lora_4=None, lora_4_scale=1.0, lora_4_layers="Video Layers",  # LoRA 4 selection, scale, and layers
     is_video_extension_subprocess=False,  # Internal: Mark subprocess calls for video extensions
     is_extension=False,  # Internal: Mark if this generation is an extension
     extension_index=0,  # Internal: Extension number for metadata
     main_base=None,  # Internal: Main video base name for consistent naming
     force_exact_resolution=True,  # Always use exact user-specified resolution (never rescale to 720*720 area)
+    lora_specs=None,  # Pre-built LoRA specs (for subprocess), overrides lora_1-4 if provided
 ):
     # Note: enable_video_extension is passed directly from UI and should be respected as-is
+    
+    # Debug: Log what LoRA parameters we received from UI
+    print(f"[LORA DEBUG] Received from UI:")
+    print(f"  lora_1={repr(lora_1)}, lora_1_scale={repr(lora_1_scale)}, lora_1_layers={repr(lora_1_layers)}")
+    print(f"  lora_2={repr(lora_2)}, lora_2_scale={repr(lora_2_scale)}, lora_2_layers={repr(lora_2_layers)}")
+    print(f"  lora_3={repr(lora_3)}, lora_3_scale={repr(lora_3_scale)}, lora_3_layers={repr(lora_3_layers)}")
+    print(f"  lora_4={repr(lora_4)}, lora_4_scale={repr(lora_4_scale)}, lora_4_layers={repr(lora_4_layers)}")
+    print(f"  lora_specs={repr(lora_specs)}")
+
+    # Additional LoRA status information
+    active_loras = []
+    if lora_specs and len(lora_specs) > 0:
+        active_loras = [os.path.basename(path) for path, scale, layers in lora_specs]
+        print(f"[LORA STATUS] Active LoRAs detected: {len(active_loras)} LoRA(s)")
+        for i, lora_name in enumerate(active_loras, 1):
+            scale, layers = next((scale, layers) for path, scale, layers in lora_specs if os.path.basename(path) == lora_name)
+            print(f"  [{i}] {lora_name} (scale: {scale}, layers: {layers})")
+    elif lora_1 or lora_2 or lora_3 or lora_4:
+        # Check individual LoRA selections
+        lora_choices, lora_path_map = scan_lora_folders()
+        for lora_name, scale in [(lora_1, lora_1_scale), (lora_2, lora_2_scale), (lora_3, lora_3_scale), (lora_4, lora_4_scale)]:
+            if lora_name and lora_name in lora_path_map:
+                active_loras.append(lora_name)
+        if active_loras:
+            print(f"[LORA STATUS] UI selections will be processed: {len(active_loras)} LoRA(s)")
+            for i, lora_name in enumerate(active_loras, 1):
+                scale = next(scale for name, scale in [(lora_1, lora_1_scale), (lora_2, lora_2_scale), (lora_3, lora_3_scale), (lora_4, lora_4_scale)] if name == lora_name)
+                print(f"  [{i}] {lora_name} (scale: {scale})")
+        else:
+            print(f"[LORA STATUS] No LoRAs selected")
+    else:
+        print(f"[LORA STATUS] No LoRAs selected")
+    
+    # Build LoRA specs from UI selections (unless already provided by subprocess)
+    if lora_specs is None:
+        lora_choices, lora_path_map = scan_lora_folders()
+        lora_specs = []
+        
+        for lora_name, lora_scale, lora_layers in [(lora_1, lora_1_scale, lora_1_layers), (lora_2, lora_2_scale, lora_2_layers), (lora_3, lora_3_scale, lora_3_layers), (lora_4, lora_4_scale, lora_4_layers)]:
+            # Convert scale to float safely (Gradio can pass strings or None)
+            try:
+                scale_float = float(lora_scale) if lora_scale is not None else 0.0
+            except (ValueError, TypeError):
+                scale_float = 0.0
+
+            if lora_name and lora_name != "None" and scale_float > 0.0:
+                lora_path = lora_path_map.get(lora_name)
+                if lora_path and os.path.exists(lora_path):
+                    lora_specs.append((lora_path, scale_float, lora_layers))
+                    print(f"[LORA BUILD] Added: {lora_name} -> {lora_path} (scale={scale_float}, layers={lora_layers})")
+                else:
+                    print(f"[WARNING] LoRA not found: {lora_name} (path: {lora_path})")
+    else:
+        # lora_specs provided directly (from subprocess), use as-is
+        # Convert lists back to tuples if needed (JSON serialization converts tuples to lists)
+        if isinstance(lora_specs, list) and len(lora_specs) > 0:
+            if isinstance(lora_specs[0], list):
+                lora_specs = [tuple(item) for item in lora_specs]
+        print(f"[LORA] Using pre-built lora_specs from subprocess: {len(lora_specs)} LoRA(s)")
+        for path, scale, layers in lora_specs:
+            print(f"[LORA] - {os.path.basename(path)} (scale={scale}, layers={layers})")
+    
+    if lora_specs:
+        print("=" * 80)
+        print(f"LORA CONFIGURATION: {len(lora_specs)} LoRA(s) selected")
+        for path, scale, layers in lora_specs:
+            print(f"  - {os.path.basename(path)}: scale={scale}, layers={layers}")
+        print("=" * 80)
 
     # CRITICAL: Validate prompt format before any processing
     is_valid, error_message = validate_prompt_format(text_prompt)
@@ -1323,6 +1396,15 @@ def generate_video(
 
                 print(f"\n[GENERATION {gen_idx + 1}/{int(num_generations)}] Starting with seed: {current_seed}")
 
+                # Show LoRA status for this generation
+                if lora_specs and len(lora_specs) > 0:
+                    print(f"[GENERATION LORA] Applying {len(lora_specs)} LoRA(s) to model:")
+                    for i, (path, scale, layers) in enumerate(lora_specs, 1):
+                        print(f"  [{i}] {os.path.basename(path)} (scale: {scale}, layers: {layers})")
+                    print(f"[GENERATION LORA] LoRAs will be merged into model weights before inference")
+                else:
+                    print(f"[GENERATION LORA] No LoRAs applied (using base model only)")
+
                 # Check for cancellation again after setup
                 check_cancellation()
 
@@ -1375,8 +1457,16 @@ def generate_video(
                         'enable_multiline_prompts': False,  # Disable multiline parsing in subprocess (already parsed)
                         'enable_video_extension': False,  # Disable video extensions in subprocess (handled in main process)
                         'force_exact_resolution': True,  # CRITICAL: Always use exact resolution in subprocess
+                        'lora_specs': lora_specs,  # Pass LoRA specs for model loading
                     }
-
+                    
+                    # Debug: Log LoRA specs being passed to subprocess
+                    print(f"[SUBPROCESS DEBUG] Passing lora_specs to subprocess: {lora_specs}")
+                    print(f"[SUBPROCESS DEBUG] lora_specs type: {type(lora_specs)}, length: {len(lora_specs)}")
+                    if lora_specs:
+                        print(f"[SUBPROCESS LORA] Subprocess will apply {len(lora_specs)} LoRA(s):")
+                        for path, scale, layers in lora_specs:
+                            print(f"  - {os.path.basename(path)} (scale: {scale}, layers: {layers})")
 
                     run_generation_subprocess(single_gen_params)
 
@@ -1459,6 +1549,7 @@ def generate_video(
                         vae_tile_overlap=vae_tile_overlap,
                         force_exact_resolution=True,  # CRITICAL: Always use exact user-specified resolution, never rescale to 720*720 area
                         text_embeddings_cache=text_embeddings_cache,  # Pass pre-encoded embeddings if available
+                        lora_specs=lora_specs,  # Pass LoRA specs for model application
                     )
 
                     # Get filename for this generation
@@ -1512,7 +1603,8 @@ def generate_video(
                             is_extension=is_extension,
                             extension_index=extension_index,
                             is_batch=False,
-                            duration_override=duration_override
+                            duration_override=duration_override,
+                            lora_specs=lora_specs
                         )
                         save_generation_metadata(output_path, generation_params, current_seed)
 
@@ -1615,6 +1707,10 @@ def generate_video(
                                     'extension_index': ext_idx + 1,  # Extension number for metadata
                                     'main_base': current_main_base,  # Pass main base name for consistent naming
                                     'force_exact_resolution': True,  # CRITICAL: Always use exact resolution in subprocess
+                                    'lora_1': lora_1, 'lora_1_scale': lora_1_scale, 'lora_1_layers': lora_1_layers,
+                                    'lora_2': lora_2, 'lora_2_scale': lora_2_scale, 'lora_2_layers': lora_2_layers,
+                                    'lora_3': lora_3, 'lora_3_scale': lora_3_scale, 'lora_3_layers': lora_3_layers,
+                                    'lora_4': lora_4, 'lora_4_scale': lora_4_scale, 'lora_4_layers': lora_4_layers,
                                 }
 
                                 run_generation_subprocess(ext_params)
@@ -1669,6 +1765,7 @@ def generate_video(
                                     vae_tile_overlap=vae_tile_overlap,
                                     force_exact_resolution=True,  # CRITICAL: Always use exact user-specified resolution, never rescale to 720*720 area
                                     text_embeddings_cache=None,  # Extensions must encode their own T5 embeddings
+                                    lora_specs=lora_specs,  # Pass LoRA specs for model application
                                 )
 
                                 # Save extension video with proper naming
@@ -1699,7 +1796,8 @@ def generate_video(
                                     use_sage_attention, no_audio, no_block_prep, clear_all, vae_tiled_decode,
                                     vae_tile_size, vae_tile_overlap, video_negative_prompt, audio_negative_prompt,
                                     is_extension=True, extension_index=ext_idx + 1, is_batch=False,
-                                    duration_override=ext_duration_override
+                                    duration_override=ext_duration_override,
+                                    lora_specs=lora_specs
                                 )
                                 save_generation_metadata(ext_output_path, ext_generation_params, current_seed)
 
@@ -2105,6 +2203,42 @@ def get_random_seed():
     import random
     return random.randint(0, 100000)
 
+def scan_lora_folders():
+    """
+    Scan lora and loras folders for LoRA files
+    Returns list of choices for dropdowns: ["None"] + lora files
+    """
+    from ovi.utils.lora_utils import scan_lora_files
+    
+    # Define folders to scan (relative to project root)
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    lora_folders = [
+        os.path.join(project_root, 'lora'),
+        os.path.join(project_root, 'loras'),
+    ]
+    
+    # Scan for LoRA files
+    lora_files = scan_lora_files(lora_folders)
+    
+    # Create choices list: "None" + display names
+    choices = ["None"]
+    lora_path_map = {"None": None}
+    
+    for display_name, full_path in lora_files:
+        choices.append(display_name)
+        lora_path_map[display_name] = full_path
+    
+    return choices, lora_path_map
+
+def refresh_lora_list():
+    """Refresh LoRA file list and return updated choices"""
+    choices, lora_path_map = scan_lora_folders()
+    # Return 12 values: 4 dropdowns, 4 scales, 4 layer dropdowns
+    dropdowns = [gr.Dropdown(choices=choices, value="None") for _ in range(4)]
+    scales = [gr.Number(value=1.0) for _ in range(4)]
+    layers = [gr.Dropdown(choices=["Video Layers", "Sound Layers", "Both"], value="Video Layers") for _ in range(4)]
+    return dropdowns + scales + layers
+
 def open_outputs_folder():
     """Open the outputs folder in the system's file explorer."""
     import subprocess
@@ -2309,6 +2443,18 @@ PRESET_DEFAULTS = {
     "enable_multiline_prompts": False,
     "enable_video_extension": False,
     "dont_auto_combine_video_input": False,
+    "lora_1": "None",
+    "lora_1_scale": 1.0,
+    "lora_1_layers": "Video Layers",
+    "lora_2": "None",
+    "lora_2_scale": 1.0,
+    "lora_2_layers": "Video Layers",
+    "lora_3": "None",
+    "lora_3_scale": 1.0,
+    "lora_3_layers": "Video Layers",
+    "lora_4": "None",
+    "lora_4_scale": 1.0,
+    "lora_4_layers": "Video Layers",
 }
 
 # Parameter validation rules
@@ -2330,6 +2476,14 @@ PRESET_VALIDATION = {
     "duration_seconds": {"type": int},
     "aspect_ratio": {"type": str, "choices": ["1:1", "16:9", "9:16", "4:3", "3:4", "21:9", "9:21", "3:2", "2:3", "5:4", "4:5", "5:3", "3:5", "16:10", "10:16"]},
     "solver_name": {"type": str, "choices": ["unipc", "euler", "dpm++"]},
+    "lora_1_scale": {"type": float, "min": 0.0, "max": 9.0},
+    "lora_1_layers": {"type": str, "choices": ["Video Layers", "Sound Layers", "Both"]},
+    "lora_2_scale": {"type": float, "min": 0.0, "max": 9.0},
+    "lora_2_layers": {"type": str, "choices": ["Video Layers", "Sound Layers", "Both"]},
+    "lora_3_scale": {"type": float, "min": 0.0, "max": 9.0},
+    "lora_3_layers": {"type": str, "choices": ["Video Layers", "Sound Layers", "Both"]},
+    "lora_4_scale": {"type": float, "min": 0.0, "max": 9.0},
+    "lora_4_layers": {"type": str, "choices": ["Video Layers", "Sound Layers", "Both"]},
 }
 
 def validate_preset_value(param_name, value):
@@ -2536,7 +2690,9 @@ def save_preset(preset_name, current_preset,
                 batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
                 vae_tiled_decode, vae_tile_size, vae_tile_overlap,
                 base_resolution_width, base_resolution_height, duration_seconds,
-                enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input):
+                enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input,
+                lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
+                lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers):
     """Save current UI state as a preset."""
     try:
         presets_dir = get_presets_dir()
@@ -2592,6 +2748,18 @@ def save_preset(preset_name, current_preset,
             "enable_multiline_prompts": enable_multiline_prompts,
             "enable_video_extension": enable_video_extension,
             "dont_auto_combine_video_input": dont_auto_combine_video_input,
+            "lora_1": lora_1,
+            "lora_1_scale": lora_1_scale,
+            "lora_1_layers": lora_1_layers,
+            "lora_2": lora_2,
+            "lora_2_scale": lora_2_scale,
+            "lora_2_layers": lora_2_layers,
+            "lora_3": lora_3,
+            "lora_3_scale": lora_3_scale,
+            "lora_3_layers": lora_3_layers,
+            "lora_4": lora_4,
+            "lora_4_scale": lora_4_scale,
+            "lora_4_layers": lora_4_layers,
             "saved_at": datetime.now().isoformat()
         }
 
@@ -2613,20 +2781,20 @@ def save_preset(preset_name, current_preset,
 
     except Exception as e:
         presets = get_available_presets()
-        return gr.update(choices=presets, value=None), gr.update(value=""), *[gr.update() for _ in range(38)], f"Error saving preset: {e}"
+        return gr.update(choices=presets, value=None), gr.update(value=""), *[gr.update() for _ in range(50)], f"Error saving preset: {e}"
 
 def load_preset(preset_name):
     """Load a preset and return all UI values with robust error handling."""
     try:
         if not preset_name:
-            return [gr.update() for _ in range(38)] + [gr.update(value=None)] + ["No preset selected"]
+            return [gr.update() for _ in range(50)] + ["No preset selected"]
 
         # Use the robust loading system
         preset_data, error_msg = load_preset_safely(preset_name)
 
         if preset_data is None:
             # Loading failed, return error state
-            return [gr.update() for _ in range(38)] + [gr.update(value=None)] + [error_msg]
+            return [gr.update() for _ in range(50)] + [error_msg]
 
         # Save as last used for auto-load (only if loading succeeded)
         try:
@@ -2724,6 +2892,18 @@ def load_preset(preset_name):
             gr.update(value=preset_data["enable_multiline_prompts"]),
             gr.update(value=preset_data["enable_video_extension"]),
             gr.update(value=preset_data.get("dont_auto_combine_video_input", False)),
+            gr.update(value=preset_data.get("lora_1", "None")),
+            gr.update(value=preset_data.get("lora_1_scale", 1.0)),
+            gr.update(value=preset_data.get("lora_1_layers", "Video Layers")),
+            gr.update(value=preset_data.get("lora_2", "None")),
+            gr.update(value=preset_data.get("lora_2_scale", 1.0)),
+            gr.update(value=preset_data.get("lora_2_layers", "Video Layers")),
+            gr.update(value=preset_data.get("lora_3", "None")),
+            gr.update(value=preset_data.get("lora_3_scale", 1.0)),
+            gr.update(value=preset_data.get("lora_3_layers", "Video Layers")),
+            gr.update(value=preset_data.get("lora_4", "None")),
+            gr.update(value=preset_data.get("lora_4_scale", 1.0)),
+            gr.update(value=preset_data.get("lora_4_layers", "Video Layers")),
             gr.update(value=preset_name),  # Update dropdown value
             f"Preset '{preset_name}' loaded successfully!{' Applied optimizations: ' + ', '.join(optimization_messages) if optimization_messages else ''}"
         )
@@ -2731,7 +2911,7 @@ def load_preset(preset_name):
     except Exception as e:
         error_msg = f"Unexpected error loading preset: {e}"
         print(f"[PRESET] {error_msg}")
-        return [gr.update() for _ in range(38)] + [gr.update(value=None)] + [error_msg]
+        return [gr.update() for _ in range(50)] + [error_msg]
 
 def initialize_app_with_auto_load():
     """Initialize app with preset dropdown choices and auto-load last preset or VRAM-based preset."""
@@ -2921,7 +3101,8 @@ def build_generation_metadata_params(text_prompt, image_path, video_frame_height
                                    cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model,
                                    use_sage_attention, no_audio, no_block_prep, clear_all, vae_tiled_decode,
                                    vae_tile_size, vae_tile_overlap, video_negative_prompt, audio_negative_prompt,
-                                   is_extension=False, extension_index=0, is_batch=False, duration_override=None):
+                                   is_extension=False, extension_index=0, is_batch=False, duration_override=None,
+                                   lora_specs=None):
     """Build metadata parameters dictionary to avoid code duplication."""
     return {
         'text_prompt': text_prompt,
@@ -2958,7 +3139,8 @@ def build_generation_metadata_params(text_prompt, image_path, video_frame_height
         'is_extension': is_extension,
         'extension_index': extension_index,
         'is_batch': is_batch,
-        'duration_override': duration_override
+        'duration_override': duration_override,
+        'lora_specs': lora_specs
     }
 
 def save_generation_metadata(output_path, generation_params, used_seed):
@@ -2971,6 +3153,13 @@ def save_generation_metadata(output_path, generation_params, used_seed):
         is_extension = generation_params.get('is_extension', False)
         extension_index = generation_params.get('extension_index', 0)
         is_batch = generation_params.get('is_batch', False)
+
+        # Prepare LoRA configuration text
+        lora_specs = generation_params.get('lora_specs')
+        if lora_specs:
+            lora_config_text = f"- LoRAs Applied: {len(lora_specs)}\n" + "\n".join([f"  - {os.path.basename(path)} (scale: {scale}, layers: {layers})" for path, scale, layers in lora_specs])
+        else:
+            lora_config_text = "- No LoRAs applied"
 
         metadata_content = f"""OVI VIDEO GENERATION METADATA
 Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
@@ -3012,6 +3201,9 @@ VAE OPTIMIZATION:
 - Tiled VAE Decode: {generation_params.get('vae_tiled_decode', False)}
 - VAE Tile Size: {generation_params.get('vae_tile_size', 'N/A')}
 - VAE Tile Overlap: {generation_params.get('vae_tile_overlap', 'N/A')}
+
+LORA CONFIGURATION:
+{lora_config_text}
 
 NEGATIVE PROMPTS:
 - Video: {generation_params.get('video_negative_prompt', 'N/A')}
@@ -3111,6 +3303,8 @@ def process_batch_generation(
     enable_multiline_prompts,
     enable_video_extension,  # Boolean checkbox from UI (not count)
     dont_auto_combine_video_input,  # New: Don't auto combine video input
+    lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
+    lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,
 ):
     """Process batch generation from input folder."""
     global ovi_engine
@@ -3389,6 +3583,10 @@ def process_batch_generation(
                         'enable_multiline_prompts': False,  # Disable in subprocess
                         'enable_video_extension': enable_video_extension,  # Pass through extension setting
                         'force_exact_resolution': True,  # CRITICAL: Always use exact resolution in subprocess
+                        'lora_1': lora_1, 'lora_1_scale': lora_1_scale, 'lora_1_layers': lora_1_layers,
+                        'lora_2': lora_2, 'lora_2_scale': lora_2_scale, 'lora_2_layers': lora_2_layers,
+                        'lora_3': lora_3, 'lora_3_scale': lora_3_scale, 'lora_3_layers': lora_3_layers,
+                        'lora_4': lora_4, 'lora_4_scale': lora_4_scale, 'lora_4_layers': lora_4_layers,
                     }
 
                     success = run_generation_subprocess(single_gen_params)
@@ -3455,6 +3653,10 @@ def process_batch_generation(
                             enable_multiline_prompts=False,  # Already handled at batch level
                             enable_video_extension=enable_video_extension,  # Pass through video extension setting
                             dont_auto_combine_video_input=dont_auto_combine_video_input,  # Pass through setting
+                            lora_1=lora_1, lora_1_scale=lora_1_scale, lora_1_layers=lora_1_layers,
+                            lora_2=lora_2, lora_2_scale=lora_2_scale, lora_2_layers=lora_2_layers,
+                            lora_3=lora_3, lora_3_scale=lora_3_scale, lora_3_layers=lora_3_layers,
+                            lora_4=lora_4, lora_4_scale=lora_4_scale, lora_4_layers=lora_4_layers,
                         )
                         
                         if last_output_path:
@@ -4379,6 +4581,125 @@ with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
                                 info="Skip processing if output video already exists"
                             )
                             batch_btn = gr.Button("🚀 Start Batch Processing", variant="primary", size="lg")
+                    
+                    # LoRA Loading Section
+                    with gr.Accordion("🎨 LoRA Management", open=True):
+                        gr.Markdown("""
+                        **LoRA Loading System**: Apply custom LoRAs to modify the model's output style.
+                        
+                        **How it works:**
+                        - Place LoRA files (.safetensors, .pt) in the `lora` or `loras` folder
+                        - Select up to 4 LoRAs with individual strength scales
+                        - LoRAs are merged into the model after loading (before generation)
+                        - Model automatically reloads only if LoRA selection changes
+                        - Set scale to 0.0 or select "None" to disable a LoRA slot
+                        """)
+                        
+                        # Get initial LoRA choices
+                        lora_choices, global_lora_path_map = scan_lora_folders()
+                        
+                        with gr.Row():
+                            with gr.Column(scale=3, min_width=1):
+                                lora_1 = gr.Dropdown(
+                                    choices=lora_choices,
+                                    value="None",
+                                    label="LoRA 1",
+                                    info="First LoRA to apply"
+                                )
+                            with gr.Column(scale=1, min_width=1):
+                                lora_1_scale = gr.Number(
+                                    value=1.0,
+                                    label="Scale",
+                                    minimum=0.0,
+                                    maximum=9.0,
+                                    step=0.1,
+                                    info="Strength (0.0-9.0)"
+                                )
+                            with gr.Column(scale=2, min_width=1):
+                                lora_1_layers = gr.Dropdown(
+                                    choices=["Video Layers", "Sound Layers", "Both"],
+                                    value="Video Layers",
+                                    label="Apply To",
+                                    info="Target layers for LoRA"
+                                )
+                        
+                        with gr.Row():
+                            with gr.Column(scale=3, min_width=1):
+                                lora_2 = gr.Dropdown(
+                                    choices=lora_choices,
+                                    value="None",
+                                    label="LoRA 2",
+                                    info="Second LoRA to apply"
+                                )
+                            with gr.Column(scale=1, min_width=1):
+                                lora_2_scale = gr.Number(
+                                    value=1.0,
+                                    label="Scale",
+                                    minimum=0.0,
+                                    maximum=9.0,
+                                    step=0.1,
+                                    info="Strength (0.0-9.0)"
+                                )
+                            with gr.Column(scale=2, min_width=1):
+                                lora_2_layers = gr.Dropdown(
+                                    choices=["Video Layers", "Sound Layers", "Both"],
+                                    value="Video Layers",
+                                    label="Apply To",
+                                    info="Target layers for LoRA"
+                                )
+                        
+                        with gr.Row():
+                            with gr.Column(scale=3, min_width=1):
+                                lora_3 = gr.Dropdown(
+                                    choices=lora_choices,
+                                    value="None",
+                                    label="LoRA 3",
+                                    info="Third LoRA to apply"
+                                )
+                            with gr.Column(scale=1, min_width=1):
+                                lora_3_scale = gr.Number(
+                                    value=1.0,
+                                    label="Scale",
+                                    minimum=0.0,
+                                    maximum=9.0,
+                                    step=0.1,
+                                    info="Strength (0.0-9.0)"
+                                )
+                            with gr.Column(scale=2, min_width=1):
+                                lora_3_layers = gr.Dropdown(
+                                    choices=["Video Layers", "Sound Layers", "Both"],
+                                    value="Video Layers",
+                                    label="Apply To",
+                                    info="Target layers for LoRA"
+                                )
+                        
+                        with gr.Row():
+                            with gr.Column(scale=3, min_width=1):
+                                lora_4 = gr.Dropdown(
+                                    choices=lora_choices,
+                                    value="None",
+                                    label="LoRA 4",
+                                    info="Fourth LoRA to apply"
+                                )
+                            with gr.Column(scale=1, min_width=1):
+                                lora_4_scale = gr.Number(
+                                    value=1.0,
+                                    label="Scale",
+                                    minimum=0.0,
+                                    maximum=9.0,
+                                    step=0.1,
+                                    info="Strength (0.0-9.0)"
+                                )
+                            with gr.Column(scale=2, min_width=1):
+                                lora_4_layers = gr.Dropdown(
+                                    choices=["Video Layers", "Sound Layers", "Both"],
+                                    value="Video Layers",
+                                    label="Apply To",
+                                    info="Target layers for LoRA"
+                                )
+                        
+                        with gr.Row():
+                            refresh_loras_btn = gr.Button("🔄 Refresh LoRA List", size="sm", variant="secondary")
 
         with gr.TabItem("How to Use"):
             with gr.Row():
@@ -4469,7 +4790,7 @@ with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
 
                         ### Prompt Engineering
                         1. **Be Specific**: Detailed descriptions = better results
-                        2. **Use Tags**: Always wrap speech in `<S>...</S>` tags
+                        2. **Use Tags**: Always wrap speech in `<S>...</E>` tags
                         3. **Audio Descriptions**: Add `<AUDCAP>...</ENDAUDCAP>` for complex audio
                         4. **Negative Prompts**: Avoid artifacts with video/audio negatives
 
@@ -4526,7 +4847,7 @@ with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
                         - ✍️ Use more specific, detailed prompts
 
                         ### Audio Issues
-                        - 🏷️ Check `<S>...</S>` tag format
+                        - 🏷️ Check `<S>...</E>` tag format
                         - 🎵 Add `<AUDCAP>...</ENDAUDCAP>` descriptions
                         - 🎚️ Adjust audio guidance scale (2.5-4.0 range)
                         - 🔧 Try different SLG layer values (8-15 range)
@@ -4817,7 +5138,7 @@ with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
             
             # Add featured example at the top
             i2v_examples.insert(0, (
-                "A stylish radio host in a professional studio leans into the microphone, adjusting his sunglasses and gesturing expressively. He says <S>Welcome back to Choice FM, you're listening to the hottest tracks in the city!</S> The camera slowly zooms in as he nods to the beat. <AUDCAP>Warm, confident male voice with professional radio tone, subtle background music, studio ambiance.<ENDAUDCAP>",
+                "A stylish radio host in a professional studio leans into the microphone, adjusting his sunglasses and gesturing expressively. He says <S>Welcome back to Choice FM, you're listening to the hottest tracks in the city!<E> The camera slowly zooms in as he nods to the beat. <AUDCAP>Warm, confident male voice with professional radio tone, subtle background music, studio ambiance.<ENDAUDCAP>",
                 "example_prompts/pngs/5.png"
             ))
 
@@ -4979,6 +5300,14 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
         """Clear the video output component before generation."""
         return None
 
+    # Wire up refresh LoRA button
+    refresh_loras_btn.click(
+        fn=refresh_lora_list,
+        inputs=[],
+        outputs=[lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
+                 lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers]
+    )
+    
     run_btn.click(
         fn=generate_video,
         inputs=[
@@ -4993,6 +5322,8 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             gr.Textbox(value=None, visible=False), gr.Textbox(value=None, visible=False), gr.Textbox(value=None, visible=False),
             enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input,
             input_video_state,  # Pass input video path for merging
+            lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
+            lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,  # LoRA parameters
         ],
         outputs=[output_path],
     )
@@ -5054,6 +5385,8 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds, auto_crop_image,
             enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input,
+            lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
+            lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,
         ],
         outputs=[output_path],
     )
@@ -5073,6 +5406,8 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds,
             enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input,
+            lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
+            lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,
         ],
         outputs=[
             preset_dropdown, preset_name,  # Update dropdown, clear name field
@@ -5086,6 +5421,8 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds,
             enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input,
+            lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
+            lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,
             gr.Textbox(visible=False)  # status message
         ],
     )
@@ -5104,6 +5441,8 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds,
             enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input,
+            lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
+            lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,
             preset_dropdown, gr.Textbox(visible=False)  # current preset, status message
         ],
     )
@@ -5123,6 +5462,8 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds,
             enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input,
+            lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
+            lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,
             preset_dropdown, gr.Textbox(visible=False)  # current preset, status message
         ],
     )

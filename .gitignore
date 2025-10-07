@@ -9,3 +9,6 @@ outputs
 temp
 ComfyUI
 org
+ComfyUI-WanVideoWrapper
+loras
+lora
