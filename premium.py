@@ -1056,6 +1056,7 @@ def generate_video(
     is_extension=False,  # Internal: Mark if this generation is an extension
     extension_index=0,  # Internal: Extension number for metadata
     main_base=None,  # Internal: Main video base name for consistent naming
+    force_exact_resolution=True,  # Always use exact user-specified resolution (never rescale to 720*720 area)
 ):
     # Note: enable_video_extension is passed directly from UI and should be respected as-is
 
@@ -1121,28 +1122,16 @@ def generate_video(
     import time
     generation_start_time = time.time()
 
-    # IMPORTANT: Recalculate video dimensions from base resolution and aspect ratio if needed
-    # This ensures consistency between base resolution and actual video dimensions
-    parsed_dims = _parse_resolution_from_label(aspect_ratio)
-    if parsed_dims:
-        # Aspect ratio has explicit dimensions, use them
-        recalc_width, recalc_height = parsed_dims
-        if recalc_width != video_frame_width or recalc_height != video_frame_height:
-            print(f"[RESOLUTION FIX] Updating resolution from {video_frame_width}x{video_frame_height} to {recalc_width}x{recalc_height} (from aspect ratio)")
-            video_frame_width, video_frame_height = recalc_width, recalc_height
-    else:
-        # Calculate from base resolution and aspect ratio name
-        base_width = _coerce_positive_int(base_resolution_width) or 720
-        base_height = _coerce_positive_int(base_resolution_height) or 720
-        current_ratios = get_common_aspect_ratios(base_width, base_height)
-        
-        # Extract ratio name from aspect_ratio (e.g., "16:9" from "16:9 - 992x512px")
-        ratio_name = _extract_ratio_name(aspect_ratio)
-        if ratio_name and ratio_name in current_ratios:
-            recalc_width, recalc_height = current_ratios[ratio_name]
-            if recalc_width != video_frame_width or recalc_height != video_frame_height:
-                print(f"[RESOLUTION FIX] Recalculated resolution from base {base_width}x{base_height} and aspect {ratio_name}: {recalc_width}x{recalc_height} (was {video_frame_width}x{video_frame_height})")
-                video_frame_width, video_frame_height = recalc_width, recalc_height
+    # CRITICAL: Always use exact user-specified Video Width and Video Height from Gradio interface
+    # No recalculation or overriding - trust the user's explicit resolution settings
+    print(f"[RESOLUTION] Using exact user-specified resolution: {video_frame_width}x{video_frame_height}")
+    
+    # Validate that dimensions are divisible by 32 (required by model)
+    if video_frame_width % 32 != 0 or video_frame_height % 32 != 0:
+        # Snap to nearest multiple of 32
+        video_frame_width = max(32, ((video_frame_width + 15) // 32) * 32)
+        video_frame_height = max(32, ((video_frame_height + 15) // 32) * 32)
+        print(f"[RESOLUTION] Snapped to 32px alignment: {video_frame_width}x{video_frame_height}")
 
     # Validate video extension requirements
     if video_extension_count > 0:
@@ -1361,7 +1350,7 @@ def generate_video(
                         'audio_negative_prompt': audio_negative_prompt,
                         'use_image_gen': False,  # Not used in single gen mode
                         'cpu_offload': cpu_offload,
-                                'delete_text_encoder': delete_text_encoder,  # Always allow T5 encoding in extension subprocess (no cached embeddings for extensions)
+                        'delete_text_encoder': delete_text_encoder,  # Always allow T5 encoding in extension subprocess (no cached embeddings for extensions)
                         'fp8_t5': fp8_t5,
                         'cpu_only_t5': cpu_only_t5,
                         'fp8_base_model': fp8_base_model,
@@ -1385,6 +1374,7 @@ def generate_video(
                         'text_embeddings_cache': None,  # Extensions must encode their own T5 embeddings
                         'enable_multiline_prompts': False,  # Disable multiline parsing in subprocess (already parsed)
                         'enable_video_extension': False,  # Disable video extensions in subprocess (handled in main process)
+                        'force_exact_resolution': True,  # CRITICAL: Always use exact resolution in subprocess
                     }
 
 
@@ -1467,6 +1457,7 @@ def generate_video(
                         vae_tiled_decode=vae_tiled_decode,
                         vae_tile_size=vae_tile_size,
                         vae_tile_overlap=vae_tile_overlap,
+                        force_exact_resolution=True,  # CRITICAL: Always use exact user-specified resolution, never rescale to 720*720 area
                         text_embeddings_cache=text_embeddings_cache,  # Pass pre-encoded embeddings if available
                     )
 
@@ -1623,6 +1614,7 @@ def generate_video(
                                     'is_extension': True,  # Mark for metadata that this is an extension
                                     'extension_index': ext_idx + 1,  # Extension number for metadata
                                     'main_base': current_main_base,  # Pass main base name for consistent naming
+                                    'force_exact_resolution': True,  # CRITICAL: Always use exact resolution in subprocess
                                 }
 
                                 run_generation_subprocess(ext_params)
@@ -1675,6 +1667,7 @@ def generate_video(
                                     vae_tiled_decode=vae_tiled_decode,
                                     vae_tile_size=vae_tile_size,
                                     vae_tile_overlap=vae_tile_overlap,
+                                    force_exact_resolution=True,  # CRITICAL: Always use exact user-specified resolution, never rescale to 720*720 area
                                     text_embeddings_cache=None,  # Extensions must encode their own T5 embeddings
                                 )
 
@@ -3154,24 +3147,18 @@ def process_batch_generation(
             img_status = "with image" if img_path else "text-only"
             print(f"  - {base_name}: {img_status}")
 
-        # IMPORTANT: Recalculate video dimensions from base resolution and aspect ratio
-        # This ensures auto-cropping uses the correct target resolution
-        parsed_dims = _parse_resolution_from_label(aspect_ratio)
-        if parsed_dims:
-            # Aspect ratio has explicit dimensions, use them
-            video_frame_width, video_frame_height = parsed_dims
-        else:
-            # Calculate from base resolution and aspect ratio name
-            base_width = _coerce_positive_int(base_resolution_width) or 720
-            base_height = _coerce_positive_int(base_resolution_height) or 720
-            current_ratios = get_common_aspect_ratios(base_width, base_height)
-            
-            # Extract ratio name from aspect_ratio (e.g., "16:9" from "16:9 - 992x512px")
-            ratio_name = _extract_ratio_name(aspect_ratio)
-            if ratio_name and ratio_name in current_ratios:
-                video_frame_width, video_frame_height = current_ratios[ratio_name]
-                print(f"[BATCH] Recalculated resolution from base {base_width}x{base_height} and aspect {ratio_name}: {video_frame_width}x{video_frame_height}")
-            # else keep the original video_frame_width/height from parameters
+        # CRITICAL: Always use exact user-specified Video Width and Video Height from Gradio interface
+        # For batch processing with auto-crop enabled, dimensions will be detected from each image
+        print(f"[BATCH RESOLUTION] Using exact user-specified resolution: {video_frame_width}x{video_frame_height}")
+        
+        # Validate that dimensions are divisible by 32 (required by model)
+        if video_frame_width % 32 != 0 or video_frame_height % 32 != 0:
+            # Snap to nearest multiple of 32
+            video_frame_width = max(32, ((video_frame_width + 15) // 32) * 32)
+            video_frame_height = max(32, ((video_frame_height + 15) // 32) * 32)
+            print(f"[BATCH RESOLUTION] Snapped to 32px alignment: {video_frame_width}x{video_frame_height}")
+        
+        print(f"[BATCH] Auto-crop: {'ENABLED (will detect aspect from each image)' if auto_crop_image else 'DISABLED (will use fixed resolution)'}")
         
         # Only initialize engine if we're not using subprocess mode (clear_all=False)
         # When clear_all=True, all batch generations run in subprocesses, so main process doesn't need models
@@ -3268,17 +3255,53 @@ def process_batch_generation(
                 image_path = convert_image_to_png(image_path)
 
             # Apply auto cropping if enabled and image exists
-            # For batch processing with auto-crop, let each image auto-detect its own aspect ratio
-            # by passing None for target dimensions (each image in batch may have different aspect ratios)
+            # For batch processing with auto-crop enabled:
+            # 1. Detect aspect ratio from image
+            # 2. Calculate resolution using base_resolution_width/height
+            # 3. Crop to that resolution
             if auto_crop_image and image_path:
-                final_image_path, detected_width, detected_height = apply_auto_crop_if_enabled(
-                    image_path, auto_crop_image, None, None, return_dimensions=True
-                )
-                # Use the auto-detected dimensions for this specific image
-                batch_video_width = detected_width if detected_width else video_frame_width
-                batch_video_height = detected_height if detected_height else video_frame_height
+                try:
+                    from PIL import Image
+                    img = Image.open(image_path)
+                    iw, ih = img.size
+                    
+                    if iw > 0 and ih > 0:
+                        # Detect closest aspect ratio from image
+                        aspect = iw / ih
+                        def get_ratio_value(ratio_str):
+                            w, h = map(float, ratio_str.split(':'))
+                            return w / h
+                        
+                        closest_ratio = min(ASPECT_RATIOS.keys(), key=lambda k: abs(get_ratio_value(k) - aspect))
+                        
+                        # Calculate resolution from base dimensions and detected aspect ratio
+                        base_width = _coerce_positive_int(base_resolution_width) or 720
+                        base_height = _coerce_positive_int(base_resolution_height) or 720
+                        current_ratios = get_common_aspect_ratios(base_width, base_height)
+                        
+                        if closest_ratio in current_ratios:
+                            batch_video_width, batch_video_height = current_ratios[closest_ratio]
+                            print(f"[BATCH AUTO-CROP] Image {iw}x{ih} → Detected aspect {closest_ratio} → Resolution {batch_video_width}x{batch_video_height} (base {base_width}x{base_height})")
+                        else:
+                            # Fallback to user-specified resolution
+                            batch_video_width = video_frame_width
+                            batch_video_height = video_frame_height
+                            print(f"[BATCH AUTO-CROP] Aspect ratio not found, using user-specified {batch_video_width}x{batch_video_height}")
+                        
+                        # Crop image to calculated resolution
+                        final_image_path = apply_auto_crop_if_enabled(image_path, auto_crop_image, batch_video_width, batch_video_height)
+                    else:
+                        # Invalid dimensions, use user-specified resolution
+                        batch_video_width = video_frame_width
+                        batch_video_height = video_frame_height
+                        final_image_path = image_path
+                except Exception as e:
+                    print(f"[BATCH AUTO-CROP] Error: {e}, using user-specified resolution")
+                    batch_video_width = video_frame_width
+                    batch_video_height = video_frame_height
+                    final_image_path = image_path
             else:
-                # If auto-crop is disabled, use the configured resolution
+                # If auto-crop is disabled, use the exact user-specified resolution
                 final_image_path = apply_auto_crop_if_enabled(image_path, auto_crop_image, video_frame_width, video_frame_height)
                 batch_video_width = video_frame_width
                 batch_video_height = video_frame_height
@@ -3365,6 +3388,7 @@ def process_batch_generation(
                         'output_dir': outputs_dir,  # Pass output directory to subprocess
                         'enable_multiline_prompts': False,  # Disable in subprocess
                         'enable_video_extension': enable_video_extension,  # Pass through extension setting
+                        'force_exact_resolution': True,  # CRITICAL: Always use exact resolution in subprocess
                     }
 
                     success = run_generation_subprocess(single_gen_params)
@@ -4016,7 +4040,7 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height):
 theme = gr.themes.Soft()
 theme.font = ["Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v5.91 : https://www.patreon.com/posts/140393220")
+    gr.Markdown("# Ovi Pro SECourses Premium App v6.0 : https://www.patreon.com/posts/140393220")
 
     image_to_use = gr.State(value=None)
     input_video_state = gr.State(value=None)  # Store input video path for merging
