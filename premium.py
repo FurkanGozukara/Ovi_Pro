@@ -1051,6 +1051,7 @@ def generate_video(
     enable_multiline_prompts=False,  # New: Enable multi-line prompt processing
     enable_video_extension=False,  # New: Enable automatic video extension based on prompt lines
     dont_auto_combine_video_input=False,  # New: Don't auto combine video input with generated video
+    disable_auto_prompt_validation=False,  # New: Skip automatic prompt validation when True
     input_video_path=None,  # New: Input video path for merging (when user uploads video)
     lora_1=None, lora_1_scale=1.0, lora_1_layers="Video Layers",  # LoRA 1 selection, scale, and layers
     lora_2=None, lora_2_scale=1.0, lora_2_layers="Video Layers",  # LoRA 2 selection, scale, and layers
@@ -1133,14 +1134,19 @@ def generate_video(
             print(f"  - {os.path.basename(path)}: scale={scale}, layers={layers}")
         print("=" * 80)
 
-    # CRITICAL: Validate prompt format before any processing
-    is_valid, error_message = validate_prompt_format(text_prompt)
-    if not is_valid:
+    # CRITICAL: Validate prompt format before any processing (unless disabled)
+    if not disable_auto_prompt_validation:
+        is_valid, error_message = validate_prompt_format(text_prompt)
+        if not is_valid:
+            print("=" * 80)
+            print("PROMPT VALIDATION FAILED")
+            print(error_message)
+            print("=" * 80)
+            raise ValueError(f"Invalid prompt format:\n\n{error_message}")
+    else:
         print("=" * 80)
-        print("PROMPT VALIDATION FAILED")
-        print(error_message)
+        print("AUTO PROMPT VALIDATION DISABLED - Proceeding with validation bypass")
         print("=" * 80)
-        raise ValueError(f"Invalid prompt format:\n\n{error_message}")
 
     # Store original duration before any overrides
     original_duration_seconds = duration_seconds
@@ -1456,6 +1462,7 @@ def generate_video(
                         'text_embeddings_cache': None,  # Extensions must encode their own T5 embeddings
                         'enable_multiline_prompts': False,  # Disable multiline parsing in subprocess (already parsed)
                         'enable_video_extension': False,  # Disable video extensions in subprocess (handled in main process)
+                        'disable_auto_prompt_validation': disable_auto_prompt_validation,  # Pass through validation setting
                         'force_exact_resolution': True,  # CRITICAL: Always use exact resolution in subprocess
                         'lora_specs': lora_specs,  # Pass LoRA specs for model loading
                     }
@@ -2443,6 +2450,7 @@ PRESET_DEFAULTS = {
     "enable_multiline_prompts": False,
     "enable_video_extension": False,
     "dont_auto_combine_video_input": False,
+    "disable_auto_prompt_validation": False,
     "lora_1": "None",
     "lora_1_scale": 1.0,
     "lora_1_layers": "Video Layers",
@@ -2690,7 +2698,7 @@ def save_preset(preset_name, current_preset,
                 batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
                 vae_tiled_decode, vae_tile_size, vae_tile_overlap,
                 base_resolution_width, base_resolution_height, duration_seconds,
-                enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input,
+                enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input, disable_auto_prompt_validation,
                 lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
                 lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers):
     """Save current UI state as a preset."""
@@ -2703,7 +2711,7 @@ def save_preset(preset_name, current_preset,
 
         if not preset_name.strip():
             presets = get_available_presets()
-            return gr.update(choices=presets, value=None), gr.update(value=""), *[gr.update() for _ in range(38)], "Please enter a preset name or select a preset to overwrite"
+            return gr.update(choices=presets, value=None), gr.update(value=""), *[gr.update() for _ in range(39)], "Please enter a preset name or select a preset to overwrite"
 
         preset_file = os.path.join(presets_dir, f"{preset_name}.json")
 
@@ -2748,6 +2756,7 @@ def save_preset(preset_name, current_preset,
             "enable_multiline_prompts": enable_multiline_prompts,
             "enable_video_extension": enable_video_extension,
             "dont_auto_combine_video_input": dont_auto_combine_video_input,
+            "disable_auto_prompt_validation": disable_auto_prompt_validation,
             "lora_1": lora_1,
             "lora_1_scale": lora_1_scale,
             "lora_1_layers": lora_1_layers,
@@ -2781,20 +2790,20 @@ def save_preset(preset_name, current_preset,
 
     except Exception as e:
         presets = get_available_presets()
-        return gr.update(choices=presets, value=None), gr.update(value=""), *[gr.update() for _ in range(50)], f"Error saving preset: {e}"
+        return gr.update(choices=presets, value=None), gr.update(value=""), *[gr.update() for _ in range(51)], f"Error saving preset: {e}"
 
 def load_preset(preset_name):
     """Load a preset and return all UI values with robust error handling."""
     try:
         if not preset_name:
-            return [gr.update() for _ in range(50)] + ["No preset selected"]
+            return [gr.update() for _ in range(51)] + ["No preset selected"]
 
         # Use the robust loading system
         preset_data, error_msg = load_preset_safely(preset_name)
 
         if preset_data is None:
             # Loading failed, return error state
-            return [gr.update() for _ in range(50)] + [error_msg]
+            return [gr.update() for _ in range(51)] + [error_msg]
 
         # Save as last used for auto-load (only if loading succeeded)
         try:
@@ -2892,6 +2901,7 @@ def load_preset(preset_name):
             gr.update(value=preset_data["enable_multiline_prompts"]),
             gr.update(value=preset_data["enable_video_extension"]),
             gr.update(value=preset_data.get("dont_auto_combine_video_input", False)),
+            gr.update(value=preset_data.get("disable_auto_prompt_validation", False)),
             gr.update(value=preset_data.get("lora_1", "None")),
             gr.update(value=preset_data.get("lora_1_scale", 1.0)),
             gr.update(value=preset_data.get("lora_1_layers", "Video Layers")),
@@ -2911,7 +2921,7 @@ def load_preset(preset_name):
     except Exception as e:
         error_msg = f"Unexpected error loading preset: {e}"
         print(f"[PRESET] {error_msg}")
-        return [gr.update() for _ in range(50)] + [error_msg]
+        return [gr.update() for _ in range(51)] + [error_msg]
 
 def initialize_app_with_auto_load():
     """Initialize app with preset dropdown choices and auto-load last preset or VRAM-based preset."""
@@ -3303,6 +3313,7 @@ def process_batch_generation(
     enable_multiline_prompts,
     enable_video_extension,  # Boolean checkbox from UI (not count)
     dont_auto_combine_video_input,  # New: Don't auto combine video input
+    disable_auto_prompt_validation,  # New: Skip automatic prompt validation when True
     lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
     lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,
 ):
@@ -3414,19 +3425,20 @@ def process_batch_generation(
                 print(f"[ERROR] Failed to read prompt file {txt_path}: {e}")
                 continue
             
-            # Validate prompt format
-            is_valid, error_message = validate_prompt_format(raw_text_prompt)
-            if not is_valid:
-                print(f"[ERROR] Invalid prompt format in {txt_path}:")
-                print(error_message)
-                print(f"[SKIPPING] {base_name} due to invalid prompt format")
-                continue
+            # Validate prompt format (unless disabled)
+            if not disable_auto_prompt_validation:
+                is_valid, error_message = validate_prompt_format(raw_text_prompt)
+                if not is_valid:
+                    print(f"[ERROR] Invalid prompt format in {txt_path}:")
+                    print(error_message)
+                    print(f"[SKIPPING] {base_name} due to invalid prompt format")
+                    continue
 
             # Parse multi-line prompts if enabled
             individual_prompts = parse_multiline_prompts(raw_text_prompt, enable_multiline_prompts)
             
-            # Validate each individual prompt line if multi-line is enabled
-            if enable_multiline_prompts:
+            # Validate each individual prompt line if multi-line is enabled (unless disabled)
+            if enable_multiline_prompts and not disable_auto_prompt_validation:
                 for i, prompt_line in enumerate(individual_prompts):
                     line_valid, line_error = validate_prompt_format(prompt_line)
                     if not line_valid:
@@ -3582,6 +3594,7 @@ def process_batch_generation(
                         'output_dir': outputs_dir,  # Pass output directory to subprocess
                         'enable_multiline_prompts': False,  # Disable in subprocess
                         'enable_video_extension': enable_video_extension,  # Pass through extension setting
+                        'disable_auto_prompt_validation': disable_auto_prompt_validation,  # Pass through validation setting
                         'force_exact_resolution': True,  # CRITICAL: Always use exact resolution in subprocess
                         'lora_1': lora_1, 'lora_1_scale': lora_1_scale, 'lora_1_layers': lora_1_layers,
                         'lora_2': lora_2, 'lora_2_scale': lora_2_scale, 'lora_2_layers': lora_2_layers,
@@ -4242,7 +4255,7 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height):
 theme = gr.themes.Soft()
 theme.font = ["Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v6.0 : https://www.patreon.com/posts/140393220")
+    gr.Markdown("# Ovi Pro SECourses Premium App v6.1 : https://www.patreon.com/posts/140393220")
 
     image_to_use = gr.State(value=None)
     input_video_state = gr.State(value=None)  # Store input video path for merging
@@ -4284,7 +4297,12 @@ with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
                         
                         # Prompt validation section
                         with gr.Row():
-                            validate_prompt_btn = gr.Button("✅ Validate Prompt Format", size="sm", variant="secondary")
+                            validate_prompt_btn = gr.Button("✅ Validate Prompt Format", size="md", variant="secondary")
+                            disable_auto_prompt_validation = gr.Checkbox(
+                                label="Do not auto enforce validation check",
+                                value=False,
+                                info="When checked, bypasses automatic prompt validation for both batch and single processing"
+                            )
                             prompt_validation_output = gr.Markdown("", visible=False)
 
                         # Aspect ratio and resolution in reorganized layout
@@ -5320,7 +5338,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds, auto_crop_image,
             gr.Textbox(value=None, visible=False), gr.Textbox(value=None, visible=False), gr.Textbox(value=None, visible=False),
-            enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input,
+            enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input, disable_auto_prompt_validation,
             input_video_state,  # Pass input video path for merging
             lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
             lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,  # LoRA parameters
@@ -5384,7 +5402,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             num_generations, randomize_seed, save_metadata, aspect_ratio, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds, auto_crop_image,
-            enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input,
+            enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input, disable_auto_prompt_validation,
             lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
             lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,
         ],
@@ -5405,7 +5423,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds,
-            enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input,
+            enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input, disable_auto_prompt_validation,
             lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
             lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,
         ],
@@ -5420,7 +5438,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds,
-            enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input,
+            enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input, disable_auto_prompt_validation,
             lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
             lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,
             gr.Textbox(visible=False)  # status message
@@ -5440,7 +5458,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds,
-            enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input,
+            enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input, disable_auto_prompt_validation,
             lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
             lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,
             preset_dropdown, gr.Textbox(visible=False)  # current preset, status message
@@ -5461,7 +5479,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds,
-            enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input,
+            enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input, disable_auto_prompt_validation,
             lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
             lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,
             preset_dropdown, gr.Textbox(visible=False)  # current preset, status message
