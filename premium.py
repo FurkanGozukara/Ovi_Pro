@@ -1333,9 +1333,9 @@ def generate_video(
         # This encodes text before any other models load, ensuring no duplication
         # Only run T5 subprocess if embeddings weren't already provided (from file)
         #
-        # CRITICAL FIX: Skip T5 pre-encoding when video extensions are enabled
-        # because each extension needs its own prompt-specific embeddings
-        if clear_all and delete_text_encoder and text_embeddings_cache is None and not enable_video_extension:
+        # CRITICAL FIX: Skip T5 pre-encoding when video extensions or multiline prompts are enabled
+        # because each extension/prompt line needs its own prompt-specific embeddings
+        if clear_all and delete_text_encoder and text_embeddings_cache is None and not enable_video_extension and not enable_multiline_prompts:
             print("=" * 80)
             print("T5 SUBPROCESS MODE (CLEAR ALL MEMORY)")
             print("Running T5 encoding in subprocess BEFORE generation subprocess")
@@ -1459,7 +1459,7 @@ def generate_video(
                         'auto_crop_image': auto_crop_image,
                         'base_filename': base_filename,  # Pass base filename for batch processing
                         'output_dir': outputs_dir,  # Pass output directory to subprocess
-                        'text_embeddings_cache': None,  # Extensions must encode their own T5 embeddings
+                        'text_embeddings_cache': text_embeddings_cache if not is_extension else None,  # Pass cached T5 embeddings to avoid re-encoding (None for extensions)
                         'enable_multiline_prompts': False,  # Disable multiline parsing in subprocess (already parsed)
                         'enable_video_extension': False,  # Disable video extensions in subprocess (handled in main process)
                         'disable_auto_prompt_validation': disable_auto_prompt_validation,  # Pass through validation setting
@@ -4258,7 +4258,7 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height):
 theme = gr.themes.Soft()
 theme.font = ["Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v6.3 : https://www.patreon.com/posts/140393220")
+    gr.Markdown("# Ovi Pro SECourses Premium App v6.4 : https://www.patreon.com/posts/140393220")
 
     image_to_use = gr.State(value=None)
     input_video_state = gr.State(value=None)  # Store input video path for merging
