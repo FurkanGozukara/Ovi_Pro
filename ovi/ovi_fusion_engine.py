@@ -468,26 +468,28 @@ class OviFusionEngine:
             print("  Format: FP8 E4M3 with per-block scaling (block_size=64)")
             print("  Expected VRAM savings: ~50% for transformer weights")
             print("=" * 80)
-            
-            # Check for cached FP8 checkpoint
+
+            # Check for cached FP8 checkpoint - but SKIP if LoRAs are applied!
+            # The cached checkpoint contains base model only, not LoRA-merged weights
             cache_path = os.path.join(self.config.ckpt_dir, "Ovi", "model_fp8_scaled.safetensors")
-            
-            if os.path.exists(cache_path):
-                print("[FP8 CACHE] Loading cached FP8 checkpoint...")
+            use_cache = os.path.exists(cache_path) and not self.lora_specs
+
+            if use_cache:
+                print("[FP8 CACHE] Loading cached FP8 checkpoint (no LoRAs applied)...")
                 from ovi.utils.fp8_fusion_optimization_utils import (
                     load_fusion_fp8_checkpoint,
                     apply_fusion_fp8_monkey_patch
                 )
-                
+
                 import time
                 load_start = time.perf_counter()
-                
+
                 success = load_fusion_fp8_checkpoint(model, cache_path)
-                
+
                 if success:
                     # Apply monkey patches for FP8 forward pass
                     model = apply_fusion_fp8_monkey_patch(model)
-                    
+
                     load_time = time.perf_counter() - load_start
                     print(f"[FP8 CACHE] Loaded and patched cached FP8 checkpoint in {load_time:.2f}s")
                     print("[FP8] Fusion model FP8 optimization complete (from cache)")
@@ -495,6 +497,10 @@ class OviFusionEngine:
                     print("[FP8 CACHE] Cache load failed, falling back to quantization...")
                     # Fall through to quantization below
                     success = False
+            elif self.lora_specs:
+                print(f"[FP8 CACHE] Skipping cached FP8 checkpoint because {len(self.lora_specs)} LoRA(s) are applied")
+                print("[FP8 CACHE] LoRA-merged weights require fresh FP8 quantization")
+                success = False
             else:
                 print(f"[FP8 CACHE] No cache found at {cache_path}")
                 success = False
@@ -525,9 +531,14 @@ class OviFusionEngine:
                 model = apply_fusion_fp8_monkey_patch(model)
                 patch_time = time.perf_counter() - patch_start
                 print(f"[FP8] Monkey patching completed in {patch_time:.2f}s")
-                
-                # Save to cache for next time
-                save_fusion_fp8_checkpoint(model, cache_path)
+
+                # Save to cache for next time - ONLY when no LoRAs are applied!
+                # LoRA-merged models should not be cached as they would be loaded incorrectly
+                if not self.lora_specs:
+                    save_fusion_fp8_checkpoint(model, cache_path)
+                    print(f"[FP8 CACHE] Saved FP8 checkpoint to cache for future use")
+                else:
+                    print(f"[FP8 CACHE] Skipping cache save (LoRA-merged model not cached)")
                 
                 print("=" * 80)
                 print("FP8 OPTIMIZATION COMPLETE")
