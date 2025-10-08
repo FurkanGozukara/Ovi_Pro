@@ -1612,6 +1612,13 @@ def generate_video(
 
                     save_video(output_path, generated_video, generated_audio, fps=24, sample_rate=16000)
                     last_output_path = output_path
+                    
+                    # CRITICAL FIX: Explicitly delete large numpy arrays to prevent RAM leak
+                    # These arrays can be 1-5GB each and Python's GC doesn't free them immediately
+                    del generated_video, generated_audio
+                    import gc
+                    gc.collect()
+                    print(f"[MEMORY CLEANUP] Large video/audio arrays freed from RAM")
 
                     # Save used source image
                     save_used_source_image(image_path, outputs_dir, output_filename)
@@ -1640,6 +1647,12 @@ def generate_video(
                         save_generation_metadata(output_path, generation_params, current_seed)
 
                     print(f"[GENERATION {gen_idx + 1}/{int(num_generations)}] Saved to: {output_path}")
+                
+                # CRITICAL FIX: Cleanup engine memory after each generation when CPU offload is enabled
+                # This ensures models are properly moved to CPU and RAM is freed
+                if not clear_all and cpu_offload and ovi_engine is not None:
+                    ovi_engine.cleanup_model_memory()
+                    print(f"[MEMORY CLEANUP] Engine memory cleanup completed")
 
                 # Handle video extensions if enabled (works for both clear_all and in-process modes)
                 if video_extension_count > 0:
@@ -1816,6 +1829,12 @@ def generate_video(
 
                                 save_video(ext_output_path, ext_generated_video, ext_generated_audio, fps=24, sample_rate=16000)
                                 extension_videos.append(ext_output_path)
+                                
+                                # CRITICAL FIX: Explicitly delete large numpy arrays to prevent RAM leak
+                                del ext_generated_video, ext_generated_audio
+                                import gc
+                                gc.collect()
+                                print(f"[MEMORY CLEANUP] Extension video/audio arrays freed from RAM")
 
                                 # Save metadata for extension
                                 ext_generation_params = build_generation_metadata_params(
@@ -1903,6 +1922,14 @@ def generate_video(
         else:
             print("  File exists: No")
         print("=" * 80)
+        
+        # CRITICAL FIX: Final memory cleanup before returning
+        # This ensures all generation artifacts are freed before control returns to caller
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        print(f"[MEMORY CLEANUP] Final cleanup completed - all generation memory freed")
 
         return last_output_path
     except Exception as e:

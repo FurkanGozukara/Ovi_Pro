@@ -102,5 +102,13 @@ def save_video(
                 os.unlink(temp_path)
             except:
                 pass  # Ignore cleanup errors
+    
+    # CRITICAL FIX: Explicitly free large intermediate arrays after encoding
+    # This prevents RAM accumulation when save_video is called in a loop
+    del frames, clip, final_clip
+    if 'audio_clip' in locals():
+        del audio_clip
+    import gc
+    gc.collect()
 
     return output_path

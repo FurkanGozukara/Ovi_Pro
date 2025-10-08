@@ -1166,14 +1166,19 @@ class OviFusionEngine:
             return None
             
     def offload_to_cpu(self, model):
+        """Enhanced CPU offload with proper cleanup."""
+        import gc
         model = model.cpu()
         if torch.cuda.is_available():
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
-
+        # Force garbage collection to free GPU memory immediately
+        gc.collect()
         return model
 
     def _offload_vaes_to_cpu(self):
+        """Enhanced VAE CPU offload with proper cleanup."""
+        import gc
         if self.vae_model_video is not None:
             self.vae_model_video.cpu()
         if self.vae_model_audio is not None:
@@ -1181,7 +1186,56 @@ class OviFusionEngine:
         if torch.cuda.is_available():
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
+        # Force garbage collection to free GPU memory immediately
+        gc.collect()
         self._vae_device = torch.device('cpu')
+    
+    def cleanup_model_memory(self):
+        """
+        Cleanup intermediate model memory and force garbage collection.
+        Call this after generation to ensure RAM is freed immediately.
+        """
+        import gc
+        
+        # Move models to CPU if they're on GPU (with error handling for custom models)
+        try:
+            if self.model is not None and next(self.model.parameters(), None) is not None:
+                device = next(self.model.parameters()).device
+                if device.type == 'cuda':
+                    self.model.cpu()
+        except Exception as e:
+            # Ignore errors for models that don't support standard .cpu() method
+            pass
+        
+        # Move VAEs to CPU
+        try:
+            if self.vae_model_video is not None:
+                self.vae_model_video.cpu()
+        except Exception:
+            pass
+            
+        try:
+            if self.vae_model_audio is not None:
+                self.vae_model_audio.cpu()
+        except Exception:
+            pass
+        
+        # Note: T5 model is already handled by _offload_vaes_to_cpu() or delete_text_encoder
+        # Don't try to move it here as it may have custom structure
+        
+        # Clear CUDA cache
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+        
+        # Force garbage collection (critical for freeing large numpy arrays)
+        gc.collect()
+        
+        # Additional cleanup pass after a short delay
+        # This helps ensure Python's GC fully processes the cleanup
+        import time
+        time.sleep(0.1)
+        gc.collect()
 
     def _ensure_vaes_on_device(self, device):
         target_device = torch.device(device) if not isinstance(device, torch.device) else device
