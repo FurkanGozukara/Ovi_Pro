@@ -6,8 +6,6 @@ import sys
 import signal
 from datetime import datetime
 
-print(f"[DEBUG] Starting premium.py with args: {sys.argv}")
-
 from ovi.ovi_fusion_engine import OviFusionEngine, DEFAULT_CONFIG
 from ovi.utils.io_utils import save_video
 from ovi.utils.processing_utils import clean_text, scale_hw_to_area_divisible
@@ -704,7 +702,7 @@ def convert_image_to_png(image_path, output_dir=None):
         traceback.print_exc()
         return image_path
 
-def process_input_media(media_path, auto_crop_image, video_width, video_height):
+def process_input_media(media_path, auto_crop_image, video_width, video_height, auto_pad_32px_divisible=False):
     """Process input media (image or video) and return image path to use + input video path if applicable.
     
     Returns:
@@ -735,10 +733,12 @@ def process_input_media(media_path, auto_crop_image, video_width, video_height):
             
             print(f"[INPUT] Input video will be merged with generated video after generation")
             
-            # Apply auto-crop if enabled
+            # Apply auto-crop/pad if enabled
             if auto_crop_image and video_width and video_height:
-                frame_path = apply_auto_crop_if_enabled(frame_path, auto_crop_image, video_width, video_height)
-                print(f"[INPUT] Auto-crop applied to extracted frame")
+                frame_path = apply_auto_crop_if_enabled(frame_path, auto_crop_image, video_width, video_height, 
+                                                       auto_pad_32px_divisible=auto_pad_32px_divisible)
+                mode_label = "Auto-pad" if auto_pad_32px_divisible else "Auto-crop"
+                print(f"[INPUT] {mode_label} applied to extracted frame")
             
             return frame_path, media_path, True
         
@@ -1058,6 +1058,7 @@ def generate_video(
     enable_video_extension=False,  # New: Enable automatic video extension based on prompt lines
     dont_auto_combine_video_input=False,  # New: Don't auto combine video input with generated video
     disable_auto_prompt_validation=False,  # New: Skip automatic prompt validation when True
+    auto_pad_32px_divisible=False,  # New: Auto pad for 32px divisibility instead of crop+resize
     input_video_path=None,  # New: Input video path for merging (when user uploads video)
     lora_1=None, lora_1_scale=1.0, lora_1_layers="Video Layers",  # LoRA 1 selection, scale, and layers
     lora_2=None, lora_2_scale=1.0, lora_2_layers="Video Layers",  # LoRA 2 selection, scale, and layers
@@ -1332,8 +1333,9 @@ def generate_video(
             # Handle image processing here to ensure we use the current image
             print(f"[DEBUG] Raw image path from upload: {image}")
 
-            # Apply auto cropping if enabled
-            image_path = apply_auto_crop_if_enabled(image, auto_crop_image, video_frame_width, video_frame_height)
+            # Apply auto cropping/padding if enabled
+            image_path = apply_auto_crop_if_enabled(image, auto_crop_image, video_frame_width, video_frame_height, 
+                                                   auto_pad_32px_divisible=auto_pad_32px_divisible)
 
             if os.path.exists(image_path):
                 print(f"[DEBUG] Final image file exists: Yes ({os.path.getsize(image_path)} bytes)")
@@ -2520,6 +2522,7 @@ PRESET_DEFAULTS = {
     "enable_video_extension": False,
     "dont_auto_combine_video_input": False,
     "disable_auto_prompt_validation": False,
+    "auto_pad_32px_divisible": False,
     "lora_1": "None",
     "lora_1_scale": 1.0,
     "lora_1_layers": "Video Layers",
@@ -2768,6 +2771,7 @@ def save_preset(preset_name, current_preset,
                 vae_tiled_decode, vae_tile_size, vae_tile_overlap,
                 base_resolution_width, base_resolution_height, duration_seconds,
                 enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input, disable_auto_prompt_validation,
+                auto_pad_32px_divisible,
                 lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
                 lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers):
     """Save current UI state as a preset."""
@@ -2826,6 +2830,7 @@ def save_preset(preset_name, current_preset,
             "enable_video_extension": enable_video_extension,
             "dont_auto_combine_video_input": dont_auto_combine_video_input,
             "disable_auto_prompt_validation": disable_auto_prompt_validation,
+            "auto_pad_32px_divisible": auto_pad_32px_divisible,
             "lora_1": lora_1,
             "lora_1_scale": lora_1_scale,
             "lora_1_layers": lora_1_layers,
@@ -2971,6 +2976,7 @@ def load_preset(preset_name):
             gr.update(value=preset_data["enable_video_extension"]),
             gr.update(value=preset_data.get("dont_auto_combine_video_input", False)),
             gr.update(value=preset_data.get("disable_auto_prompt_validation", False)),
+            gr.update(value=preset_data.get("auto_pad_32px_divisible", False)),
             gr.update(value=preset_data.get("lora_1", "None")),
             gr.update(value=preset_data.get("lora_1_scale", 1.0)),
             gr.update(value=preset_data.get("lora_1_layers", "Video Layers")),
@@ -3383,6 +3389,7 @@ def process_batch_generation(
     enable_video_extension,  # Boolean checkbox from UI (not count)
     dont_auto_combine_video_input,  # New: Don't auto combine video input
     disable_auto_prompt_validation,  # New: Skip automatic prompt validation when True
+    auto_pad_32px_divisible,  # New: Auto pad for 32px divisibility
     lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
     lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,
 ):
@@ -3573,8 +3580,9 @@ def process_batch_generation(
                             batch_video_height = video_frame_height
                             print(f"[BATCH AUTO-CROP] Aspect ratio not found, using user-specified {batch_video_width}x{batch_video_height}")
                         
-                        # Crop image to calculated resolution
-                        final_image_path = apply_auto_crop_if_enabled(image_path, auto_crop_image, batch_video_width, batch_video_height)
+                        # Crop/pad image to calculated resolution
+                        final_image_path = apply_auto_crop_if_enabled(image_path, auto_crop_image, batch_video_width, batch_video_height,
+                                                                     auto_pad_32px_divisible=auto_pad_32px_divisible)
                     else:
                         # Invalid dimensions, use user-specified resolution
                         batch_video_width = video_frame_width
@@ -3587,7 +3595,8 @@ def process_batch_generation(
                     final_image_path = image_path
             else:
                 # If auto-crop is disabled, use the exact user-specified resolution
-                final_image_path = apply_auto_crop_if_enabled(image_path, auto_crop_image, video_frame_width, video_frame_height)
+                final_image_path = apply_auto_crop_if_enabled(image_path, auto_crop_image, video_frame_width, video_frame_height,
+                                                             auto_pad_32px_divisible=auto_pad_32px_divisible)
                 batch_video_width = video_frame_width
                 batch_video_height = video_frame_height
 
@@ -3679,6 +3688,7 @@ def process_batch_generation(
                         'enable_multiline_prompts': False,  # Disable in subprocess
                         'enable_video_extension': enable_video_extension,  # Pass through extension setting
                         'disable_auto_prompt_validation': disable_auto_prompt_validation,  # Pass through validation setting
+                        'auto_pad_32px_divisible': auto_pad_32px_divisible,  # Pass through padding setting
                         'force_exact_resolution': True,  # CRITICAL: Always use exact resolution in subprocess
                         'lora_1': lora_1, 'lora_1_scale': lora_1_scale, 'lora_1_layers': lora_1_layers,
                         'lora_2': lora_2, 'lora_2_scale': lora_2_scale, 'lora_2_layers': lora_2_layers,
@@ -3750,6 +3760,7 @@ def process_batch_generation(
                             enable_multiline_prompts=False,  # Already handled at batch level
                             enable_video_extension=enable_video_extension,  # Pass through video extension setting
                             dont_auto_combine_video_input=dont_auto_combine_video_input,  # Pass through setting
+                            auto_pad_32px_divisible=auto_pad_32px_divisible,  # Pass through padding setting
                             lora_1=lora_1, lora_1_scale=lora_1_scale, lora_1_layers=lora_1_layers,
                             lora_2=lora_2, lora_2_scale=lora_2_scale, lora_2_layers=lora_2_layers,
                             lora_3=lora_3, lora_3_scale=lora_3_scale, lora_3_layers=lora_3_layers,
@@ -3829,7 +3840,64 @@ def load_i2v_example_with_resolution(prompt, img_path):
         print(f"Error loading I2V example: {e}")
         return (prompt, img_path, gr.update(), gr.update(), gr.update(), img_path)
 
-def apply_auto_crop_if_enabled(image_path, auto_crop_image, target_width=None, target_height=None, return_dimensions=False):
+def pad_image_to_resolution(image, target_width, target_height):
+    """Intelligently downscale and pad image to target resolution maintaining aspect ratio.
+    
+    This function:
+    1. Downscales image to fit within target dimensions (maintaining aspect ratio)
+    2. Pads equally on both sides to reach exact target dimensions
+    3. Uses black padding (RGB: 0, 0, 0)
+    
+    Args:
+        image: PIL Image object
+        target_width: Target width (should be divisible by 32)
+        target_height: Target height (should be divisible by 32)
+    
+    Returns:
+        PIL Image object with exact target dimensions
+    """
+    from PIL import Image as PILImage
+    
+    orig_w, orig_h = image.size
+    
+    # Calculate scaling to fit within target dimensions (maintaining aspect ratio)
+    scale_w = target_width / orig_w
+    scale_h = target_height / orig_h
+    scale = min(scale_w, scale_h)  # Use smaller scale to fit within bounds
+    
+    # Calculate new dimensions after scaling (maintaining aspect ratio)
+    new_w = int(orig_w * scale)
+    new_h = int(orig_h * scale)
+    
+    # Ensure dimensions don't exceed target (edge case protection)
+    new_w = min(new_w, target_width)
+    new_h = min(new_h, target_height)
+    
+    # Downscale image
+    scaled_image = image.resize((new_w, new_h), PILImage.Resampling.LANCZOS)
+    
+    # Calculate padding needed
+    pad_w = target_width - new_w
+    pad_h = target_height - new_h
+    
+    # Distribute padding equally on both sides
+    pad_left = pad_w // 2
+    pad_right = pad_w - pad_left  # Handles odd padding
+    pad_top = pad_h // 2
+    pad_bottom = pad_h - pad_top  # Handles odd padding
+    
+    # Create new image with target dimensions (black background)
+    padded_image = PILImage.new('RGB', (target_width, target_height), (0, 0, 0))
+    
+    # Paste scaled image centered
+    padded_image.paste(scaled_image, (pad_left, pad_top))
+    
+    print(f"[AUTO-PAD] Original: {orig_w}×{orig_h} → Scaled: {new_w}×{new_h} → Padded: {target_width}×{target_height}")
+    print(f"[AUTO-PAD] Padding applied - Left: {pad_left}px, Right: {pad_right}px, Top: {pad_top}px, Bottom: {pad_bottom}px")
+    
+    return padded_image
+
+def apply_auto_crop_if_enabled(image_path, auto_crop_image, target_width=None, target_height=None, return_dimensions=False, auto_pad_32px_divisible=False):
     """Apply auto cropping to image if enabled. Returns the final image path to use.
 
     When target_width and target_height are provided, they are used as the target resolution.
@@ -3839,6 +3907,7 @@ def apply_auto_crop_if_enabled(image_path, auto_crop_image, target_width=None, t
 
     Args:
         return_dimensions: If True, returns (image_path, width, height) instead of just image_path
+        auto_pad_32px_divisible: If True, intelligently downscales and pads instead of crop+resize
     """
     # Defensive checks to prevent errors with invalid image_path
     if not isinstance(image_path, (str, type(None))):
@@ -3854,7 +3923,8 @@ def apply_auto_crop_if_enabled(image_path, auto_crop_image, target_width=None, t
         return image_path
 
     try:
-        print("[AUTO-CROP] Auto-cropping image for generation...")
+        mode_label = "AUTO-PAD" if auto_pad_32px_divisible else "AUTO-CROP"
+        print(f"[{mode_label}] Processing image for generation...")
         img = Image.open(image_path)
         iw, ih = img.size
         if ih > 0 and iw > 0:
@@ -3875,60 +3945,68 @@ def apply_auto_crop_if_enabled(image_path, auto_crop_image, target_width=None, t
                         break
                 if not closest_key:
                     closest_key = f"{target_w}x{target_h}"
-                print(f"[AUTO-CROP] Using provided resolution: {target_w}x{target_h} ({closest_key})")
+                print(f"[{mode_label}] Using provided resolution: {target_w}x{target_h} ({closest_key})")
             else:
                 # Auto-detect from image dimensions
                 closest_key = min(ASPECT_RATIOS.keys(), key=lambda k: abs(get_ratio_value(k) - aspect))
                 target_w, target_h = ASPECT_RATIOS[closest_key]
-                print(f"[AUTO-CROP] Image {iw}×{ih} (aspect {aspect:.3f}) → Auto-detected ratio: {closest_key} → {target_w}×{target_h}")
+                print(f"[{mode_label}] Image {iw}×{ih} (aspect {aspect:.3f}) → Auto-detected ratio: {closest_key} → {target_w}×{target_h}")
 
-            target_aspect = target_w / target_h
-            image_aspect = iw / ih
-
-            # Center crop to target aspect
-            if image_aspect > target_aspect:
-                crop_w = int(ih * target_aspect)
-                left = (iw - crop_w) // 2
-                box = (left, 0, left + crop_w, ih)
+            # Choose processing method based on auto_pad_32px_divisible
+            if auto_pad_32px_divisible:
+                # Use intelligent downscaling + padding
+                processed = pad_image_to_resolution(img, target_w, target_h)
             else:
-                crop_h = int(iw / target_aspect)
-                top = (ih - crop_h) // 2
-                box = (0, top, iw, top + crop_h)
+                # Use traditional crop + resize
+                target_aspect = target_w / target_h
+                image_aspect = iw / ih
 
-            cropped = img.crop(box).resize((target_w, target_h), Image.Resampling.LANCZOS)
+                # Center crop to target aspect
+                if image_aspect > target_aspect:
+                    crop_w = int(ih * target_aspect)
+                    left = (iw - crop_w) // 2
+                    box = (left, 0, left + crop_w, ih)
+                else:
+                    crop_h = int(iw / target_aspect)
+                    top = (ih - crop_h) // 2
+                    box = (0, top, iw, top + crop_h)
+
+                processed = img.crop(box).resize((target_w, target_h), Image.Resampling.LANCZOS)
 
             # Save to temp dir
             tmp_dir = os.path.join(os.path.dirname(__file__), "temp")
             os.makedirs(tmp_dir, exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            cropped_path = os.path.join(tmp_dir, f"cropped_{timestamp}.png")
-            cropped.save(cropped_path)
-            print(f"[AUTO-CROP] Cropped image saved to: {cropped_path}")
+            output_filename = f"padded_{timestamp}.png" if auto_pad_32px_divisible else f"cropped_{timestamp}.png"
+            output_path = os.path.join(tmp_dir, output_filename)
+            processed.save(output_path)
+            print(f"[{mode_label}] Processed image saved to: {output_path}")
             
             if return_dimensions:
-                return cropped_path, target_w, target_h
-            return cropped_path
+                return output_path, target_w, target_h
+            return output_path
         else:
-            print("[AUTO-CROP] Invalid image dimensions, using original")
+            print(f"[{mode_label}] Invalid image dimensions, using original")
             if return_dimensions:
                 return image_path, target_width, target_height
             return image_path
     except Exception as e:
-        print(f"[AUTO-CROP] Auto-crop failed: {e}, using original image")
+        print(f"[{mode_label}] Processing failed: {e}, using original image")
         if return_dimensions:
             return image_path, target_width, target_height
         return image_path
 
-def update_cropped_image_only(original_image_path, auto_crop_image, video_width, video_height, orig_width=None, orig_height=None):
-    """Update only the cropped image preview when resolution changes.
+def update_cropped_image_only(original_image_path, auto_crop_image, video_width, video_height, orig_width=None, orig_height=None, auto_pad_32px_divisible=False):
+    """Update only the cropped/padded image preview when resolution changes.
     
-    CRITICAL: This function ALWAYS uses the ORIGINAL image for cropping.
+    CRITICAL: This function ALWAYS uses the ORIGINAL image for cropping/padding.
     It should NEVER update input_preview or image_resolution_label.
     Those should only be set once during upload and remain unchanged.
     
     Args:
         original_image_path: Path to the ORIGINAL uploaded image (never a cropped version)
         orig_width, orig_height: Original image dimensions (for validation, not display)
+        auto_pad_32px_divisible: If True, use padding instead of crop+resize
     """
     if original_image_path is None or not os.path.exists(original_image_path):
         return (
@@ -3980,36 +4058,44 @@ def update_cropped_image_only(original_image_path, auto_crop_image, video_width,
                 original_image_path  # Return original
             )
 
-        target_aspect = target_w / target_h
-        image_aspect = iw / ih
-
-        # Center crop to target aspect
-        if image_aspect > target_aspect:
-            crop_w = int(ih * target_aspect)
-            left = (iw - crop_w) // 2
-            box = (left, 0, left + crop_w, ih)
+        # Choose processing method based on auto_pad_32px_divisible
+        if auto_pad_32px_divisible:
+            # Use intelligent downscaling + padding
+            processed = pad_image_to_resolution(img, target_w, target_h)
         else:
-            crop_h = int(iw / target_aspect)
-            top = (ih - crop_h) // 2
-            box = (0, top, iw, top + crop_h)
+            # Use traditional crop + resize
+            target_aspect = target_w / target_h
+            image_aspect = iw / ih
 
-        cropped = img.crop(box).resize((target_w, target_h), Image.Resampling.LANCZOS)
+            # Center crop to target aspect
+            if image_aspect > target_aspect:
+                crop_w = int(ih * target_aspect)
+                left = (iw - crop_w) // 2
+                box = (left, 0, left + crop_w, ih)
+            else:
+                crop_h = int(iw / target_aspect)
+                top = (ih - crop_h) // 2
+                box = (0, top, iw, top + crop_h)
+
+            processed = img.crop(box).resize((target_w, target_h), Image.Resampling.LANCZOS)
 
         # Save to temp dir
         tmp_dir = os.path.join(os.path.dirname(__file__), "temp")
         os.makedirs(tmp_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        cropped_path = os.path.join(tmp_dir, f"cropped_{timestamp}.png")
-        cropped.save(cropped_path)
+        output_filename = f"padded_{timestamp}.png" if auto_pad_32px_divisible else f"cropped_{timestamp}.png"
+        processed_path = os.path.join(tmp_dir, output_filename)
+        processed.save(processed_path)
 
         # Create output resolution label
-        output_res_label = f"**Cropped Image Resolution:** {target_w}×{target_h}px"
+        label_prefix = "Padded" if auto_pad_32px_divisible else "Cropped"
+        output_res_label = f"**{label_prefix} Image Resolution:** {target_w}×{target_h}px"
 
-        # ONLY return cropped display and cropped label - NEVER touch input preview/label
+        # ONLY return processed display and label - NEVER touch input preview/label
         return (
-            gr.update(visible=True, value=cropped_path),
+            gr.update(visible=True, value=processed_path),
             gr.update(value=output_res_label, visible=True),
-            cropped_path  # Return newly cropped image for generation
+            processed_path  # Return newly processed image for generation
         )
     except Exception as e:
         print(f"Error in update_cropped_image_only: {e}")
@@ -4339,8 +4425,8 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height):
 theme = gr.themes.Soft()
 theme.font = ["Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v7.1 : https://www.patreon.com/posts/140393220")
-
+    gr.Markdown("# Ovi Pro SECourses Premium App v7.2 : https://www.patreon.com/posts/140393220")
+    print("Ovi Pro SECourses Premium App v7.2")
     image_to_use = gr.State(value=None)
     input_video_state = gr.State(value=None)  # Store input video path for merging
     original_image_path = gr.State(value=None)  # Store original uploaded image path (never changes until new upload)
@@ -4386,6 +4472,11 @@ with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
                                 label="Do not auto enforce validation check",
                                 value=False,
                                 info="When checked, bypasses automatic prompt validation for both batch and single processing"
+                            )
+                            auto_pad_32px_divisible = gr.Checkbox(
+                                label="Auto pad for 32px divisibility",
+                                value=False,
+                                info="Intelligently downscale and pad images (maintains aspect ratio) instead of crop+resize"
                             )
                             prompt_validation_output = gr.Markdown("", visible=False)
 
@@ -5311,7 +5402,7 @@ with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
         outputs=[aspect_ratio, video_width, video_height],
     ).then(
         fn=update_cropped_image_only,
-        inputs=[original_image_path, auto_crop_image, video_width, video_height, original_image_width, original_image_height],
+        inputs=[original_image_path, auto_crop_image, video_width, video_height, original_image_width, original_image_height, auto_pad_32px_divisible],
         outputs=[cropped_display, cropped_resolution_label, image_to_use]
     )
 
@@ -5321,7 +5412,7 @@ with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
         outputs=[aspect_ratio, video_width, video_height],
     ).then(
         fn=update_cropped_image_only,
-        inputs=[original_image_path, auto_crop_image, video_width, video_height, original_image_width, original_image_height],
+        inputs=[original_image_path, auto_crop_image, video_width, video_height, original_image_width, original_image_height, auto_pad_32px_divisible],
         outputs=[cropped_display, cropped_resolution_label, image_to_use]
     )
 
@@ -5332,7 +5423,7 @@ with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
         outputs=[video_width, video_height],
     ).then(
         fn=update_cropped_image_only,
-        inputs=[original_image_path, auto_crop_image, video_width, video_height, original_image_width, original_image_height],
+        inputs=[original_image_path, auto_crop_image, video_width, video_height, original_image_width, original_image_height, auto_pad_32px_divisible],
         outputs=[cropped_display, cropped_resolution_label, image_to_use]
     )
 
@@ -5423,6 +5514,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             base_resolution_width, base_resolution_height, duration_seconds, auto_crop_image,
             gr.Textbox(value=None, visible=False), gr.Textbox(value=None, visible=False), gr.Textbox(value=None, visible=False),
             enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input, disable_auto_prompt_validation,
+            auto_pad_32px_divisible,
             input_video_state,  # Pass input video path for merging
             lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
             lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,  # LoRA parameters
@@ -5446,17 +5538,24 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
                 original_image_path, original_image_width, original_image_height]
     )
 
+    # Update cropped image when auto_pad_32px_divisible changes
+    auto_pad_32px_divisible.change(
+        fn=update_cropped_image_only,
+        inputs=[original_image_path, auto_crop_image, video_width, video_height, original_image_width, original_image_height, auto_pad_32px_divisible],
+        outputs=[cropped_display, cropped_resolution_label, image_to_use]
+    )
+
     # Auto-update cropped image when video width/height changes manually
     # CRITICAL: Always pass ORIGINAL image path, not image_to_use (which might be previously cropped)
     video_width.change(
         fn=update_cropped_image_only,
-        inputs=[original_image_path, auto_crop_image, video_width, video_height, original_image_width, original_image_height],
+        inputs=[original_image_path, auto_crop_image, video_width, video_height, original_image_width, original_image_height, auto_pad_32px_divisible],
         outputs=[cropped_display, cropped_resolution_label, image_to_use]
     )
 
     video_height.change(
         fn=update_cropped_image_only,
-        inputs=[original_image_path, auto_crop_image, video_width, video_height, original_image_width, original_image_height],
+        inputs=[original_image_path, auto_crop_image, video_width, video_height, original_image_width, original_image_height, auto_pad_32px_divisible],
         outputs=[cropped_display, cropped_resolution_label, image_to_use]
     )
 
@@ -5487,6 +5586,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds, auto_crop_image,
             enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input, disable_auto_prompt_validation,
+            auto_pad_32px_divisible,
             lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
             lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,
         ],
@@ -5508,6 +5608,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds,
             enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input, disable_auto_prompt_validation,
+            auto_pad_32px_divisible,
             lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
             lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,
         ],
@@ -5523,6 +5624,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds,
             enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input, disable_auto_prompt_validation,
+            auto_pad_32px_divisible,
             lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
             lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,
             gr.Textbox(visible=False)  # status message
@@ -5543,6 +5645,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds,
             enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input, disable_auto_prompt_validation,
+            auto_pad_32px_divisible,
             lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
             lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,
             preset_dropdown, gr.Textbox(visible=False)  # current preset, status message
@@ -5564,6 +5667,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds,
             enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input, disable_auto_prompt_validation,
+            auto_pad_32px_divisible,
             lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
             lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,
             preset_dropdown, gr.Textbox(visible=False)  # current preset, status message
