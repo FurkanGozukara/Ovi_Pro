@@ -1,9 +1,9 @@
 {
   "preset_version": "3.2",
-  "video_text_prompt": "",
-  "aspect_ratio": "16:9 - 320x192px",
-  "video_width": 320,
-  "video_height": 192,
+  "video_text_prompt": "A midshot athletic build male in standing in a lit modern room. He looks directly into the camera with calm smile with illuminated by the warm ambient light. He says, <S>[strong sound] I am an artificial intelligence android robot.<E> and looks at the camera.<AUDCAP>Strong male voice with a strong synthetic undertone, strong and articulate tone, indoor acoustics, slight pauses, subtle emphasis on I am an artificial intelligence\".<ENDAUDCAP>\"\n\nA midshot athletic build male in standing in a lit modern room. He looks directly into the camera with calm smile with illuminated by the warm ambient light. He says, <S>I am king of the hills<E> and looks at the camera.<AUDCAP>Strong male voice with a strong synthetic undertone, strong and articulate tone, indoor acoustics, slight pauses, subtle emphasis on I am an artificial intelligence\".<ENDAUDCAP>\"",
+  "aspect_ratio": "1:1 - 224x224px",
+  "video_width": 224,
+  "video_height": 224,
   "auto_crop_image": true,
   "video_seed": 99,
   "randomize_seed": false,
@@ -17,7 +17,7 @@
   "audio_guidance_scale": 3,
   "slg_layer": 11,
   "blocks_to_swap": 0,
-  "cpu_offload": false,
+  "cpu_offload": true,
   "delete_text_encoder": false,
   "fp8_t5": false,
   "cpu_only_t5": false,
@@ -51,5 +51,5 @@
   "lora_4": "None",
   "lora_4_scale": 1,
   "lora_4_layers": "Video Layers",
-  "saved_at": "2025-10-08T13:37:59.643957"
+  "saved_at": "2025-10-08T14:39:12.949581"
 }

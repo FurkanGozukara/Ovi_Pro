@@ -794,7 +794,7 @@ class OviFusionEngine:
                 if parent_dir not in sys.path:
                     sys.path.insert(0, parent_dir)
                 
-                from premium import get_t5_cache_key, load_t5_cached_embeddings, save_t5_cached_embeddings
+                from ovi.utils.t5_cache_utils import get_t5_cache_key, load_t5_cached_embeddings, save_t5_cached_embeddings
                 
                 cache_key = get_t5_cache_key(text_prompt, video_negative_prompt, audio_negative_prompt, self.fp8_t5)
                 print(f"[T5 CACHE] Cache key: {cache_key}")
