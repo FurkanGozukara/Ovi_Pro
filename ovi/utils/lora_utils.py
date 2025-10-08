@@ -293,6 +293,29 @@ def merge_multiple_loras(model: nn.Module, lora_specs: List[Tuple[str, float]],
     if not lora_specs:
         return {"total_loras": 0, "matched_layers": 0, "total_keys": 0}
     
+    # ===== CRITICAL: Configure PyTorch threads for optimal CPU performance =====
+    # PyTorch defaults to using only physical cores, ignoring hyperthreading.
+    # This can cause major slowdowns on systems with low thread counts.
+    # We auto-configure to use all logical cores for maximum matrix multiplication speed.
+    cpu_count_logical = psutil.cpu_count(logical=True)
+    cpu_count_physical = psutil.cpu_count(logical=False)
+    
+    # Save original thread settings to restore later
+    original_torch_threads = torch.get_num_threads()
+    
+    # Set intra-op threads to use all logical cores (includes hyperthreading)
+    # This is critical for torch.mm() performance in calculate_lora_weight()
+    # Note: We can't change inter-op threads here as model loading has already used parallel ops
+    optimal_threads = cpu_count_logical if cpu_count_logical else cpu_count_physical
+    torch.set_num_threads(optimal_threads)
+    
+    if PROFILE_LORA_MERGE:
+        if original_torch_threads != optimal_threads:
+            logging.info(
+                f"LoRA merge: Auto-configured PyTorch intra-op threads: {original_torch_threads} → {optimal_threads} "
+                f"(using all {cpu_count_logical} logical cores for optimal matrix multiplication)"
+            )
+    
     total_matched = 0
     total_keys = 0
     
@@ -300,8 +323,6 @@ def merge_multiple_loras(model: nn.Module, lora_specs: List[Tuple[str, float]],
     process = psutil.Process() if PROFILE_LORA_MERGE else None
     torch_threads = torch.get_num_threads() if PROFILE_LORA_MERGE else None
     torch_interop_threads = torch.get_num_interop_threads() if PROFILE_LORA_MERGE else None
-    cpu_count_logical = psutil.cpu_count(logical=True) if PROFILE_LORA_MERGE else None
-    cpu_count_physical = psutil.cpu_count(logical=False) if PROFILE_LORA_MERGE else None
     affinity = process.cpu_affinity() if PROFILE_LORA_MERGE and hasattr(process, "cpu_affinity") else None
 
     for lora_index, (lora_path, scale) in enumerate(lora_specs, start=1):
@@ -378,6 +399,27 @@ def merge_multiple_loras(model: nn.Module, lora_specs: List[Tuple[str, float]],
             )
         if affinity:
             print(f"  CPU affinity: {affinity}")
+        
+        # CRITICAL DIAGNOSTIC: Check BLAS library for performance debugging
+        try:
+            import torch.__config__ as torch_config
+            config_str = torch_config.show()
+            # Extract BLAS library info
+            blas_lib = "UNKNOWN"
+            if "MKL" in config_str:
+                blas_lib = "Intel MKL (optimized)"
+            elif "OpenBLAS" in config_str:
+                blas_lib = "OpenBLAS (optimized)"
+            elif "BLAS" in config_str:
+                blas_lib = "Generic BLAS (may be slow)"
+            else:
+                blas_lib = "None detected (VERY SLOW!)"
+            print(f"  BLAS backend: {blas_lib}")
+        except Exception as e:
+            print(f"  BLAS backend: Unable to detect (error: {type(e).__name__})")
+    
+    # Restore original intra-op thread setting
+    torch.set_num_threads(original_torch_threads)
     
     return {
         "total_loras": len([s for s in lora_specs if s[1] != 0.0]),
