@@ -1201,10 +1201,19 @@ def generate_video(
             print(f"[WARNING] Embeddings file not found: {text_embeddings_cache}")
             text_embeddings_cache = None
 
-    # CRITICAL FIX: Reset text embeddings cache at the start of each generation
-    # This ensures that when prompt changes, new embeddings are always computed
-    # instead of reusing cached embeddings from previous generations
-    text_embeddings_cache = None
+    # IMPORTANT: Only clear cache when processing multiple different prompts (multiline mode)
+    # For single prompt generation, preserve cached embeddings to avoid re-encoding
+    # This prevents infinite subprocess loops when clear_all=True
+    # Video extensions explicitly set text_embeddings_cache=None in their subprocess params
+    # Batch processing creates separate generate_video() calls, so cache is naturally isolated
+    if enable_multiline_prompts:
+        # Multiline mode: each prompt line needs separate embeddings
+        # Cache will be cleared here, then each line will encode or load its own cache
+        text_embeddings_cache = None
+        print(f"[CACHE] Cleared embeddings cache for multiline prompt processing ({len(text_prompt.splitlines())} lines)")
+    elif text_embeddings_cache is not None:
+        print(f"[CACHE] Preserving embeddings cache for single prompt generation")
+    # Note: When cache is None at this point, T5 encoding will run below (expected behavior)
 
     # Start timing
     import time
@@ -4425,8 +4434,8 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height):
 theme = gr.themes.Soft()
 theme.font = ["Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v7.2 : https://www.patreon.com/posts/140393220")
-    print("Ovi Pro SECourses Premium App v7.2")
+    gr.Markdown("# Ovi Pro SECourses Premium App v7.3 : https://www.patreon.com/posts/140393220")
+    print("Ovi Pro SECourses Premium App v7.3")
     image_to_use = gr.State(value=None)
     input_video_state = gr.State(value=None)  # Store input video path for merging
     original_image_path = gr.State(value=None)  # Store original uploaded image path (never changes until new upload)
