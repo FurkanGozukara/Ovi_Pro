@@ -1181,16 +1181,6 @@ def generate_video(
     # Reset cancellation flag at the start of each generation request
     reset_cancellation()
     
-    # CRITICAL: Auto-enable "Clear All Memory" when "Delete T5 After Encoding" is enabled
-    # This ensures T5 subprocess runs in isolation without model duplication
-    if delete_text_encoder and not clear_all:
-        print("=" * 80)
-        print("AUTO-OPTIMIZATION: Enabling 'Clear All Memory' mode")
-        print("When 'Delete T5 After Encoding' is enabled, 'Clear All Memory' is automatically enabled")
-        print("This prevents model duplication and ensures 100% memory cleanup")
-        print("=" * 80)
-        clear_all = True
-    
     # Load text embeddings from file if provided as path (from subprocess)
     if text_embeddings_cache is not None and isinstance(text_embeddings_cache, str):
         if os.path.exists(text_embeddings_cache):
@@ -1488,7 +1478,7 @@ def generate_video(
                         'audio_negative_prompt': audio_negative_prompt,
                         'use_image_gen': False,  # Not used in single gen mode
                         'cpu_offload': cpu_offload,
-                        'delete_text_encoder': delete_text_encoder,  # Always allow T5 encoding in extension subprocess (no cached embeddings for extensions)
+                        'delete_text_encoder': False,  # Set to False in subprocess (T5 already encoded and passed via text_embeddings_cache)
                         'fp8_t5': fp8_t5,
                         'cpu_only_t5': cpu_only_t5,
                         'fp8_base_model': fp8_base_model,
@@ -1748,7 +1738,7 @@ def generate_video(
                                     'audio_negative_prompt': audio_negative_prompt,
                                     'use_image_gen': False,
                                     'cpu_offload': cpu_offload,
-                                    'delete_text_encoder': delete_text_encoder if text_embeddings_cache is None else False,
+                                    'delete_text_encoder': False,  # Set to False in subprocess (subprocess already isolated, T5 encoding handled separately)
                                     'fp8_t5': fp8_t5,
                                     'cpu_only_t5': cpu_only_t5,
                                     'fp8_base_model': fp8_base_model,
@@ -2918,11 +2908,11 @@ def load_preset(preset_name):
 
         optimization_messages = []
 
-        # RAM-based optimization: Enable Delete T5 After Encoding for RAM < 128GB
-        if ram_gb > 0 and ram_gb < 63:
-            preset_data["delete_text_encoder"] = True
-            optimization_messages.append(f"RAM {ram_gb:.1f}GB < 128GB → Enabled Delete T5 After Encoding")
-            print(f"  ✓ RAM optimization: Enabled Delete T5 After Encoding (RAM: {ram_gb:.1f}GB < 128GB)")
+        # RAM-based optimization: Enable Clear All Memory for RAM < 128GB
+        if ram_gb > 0 and ram_gb < 128:
+            preset_data["clear_all"] = True
+            optimization_messages.append(f"RAM {ram_gb:.1f}GB < 128GB → Enabled Clear All Memory")
+            print(f"  ✓ RAM optimization: Enabled Clear All Memory (RAM: {ram_gb:.1f}GB < 128GB)")
 
         # VRAM-based optimizations (same as before)
         if vram_gb > 0:
@@ -3099,11 +3089,11 @@ def initialize_app_with_auto_load():
 
         optimization_messages = []
 
-        # RAM-based optimization: Enable Delete T5 After Encoding for RAM < 128GB
+        # RAM-based optimization: Enable Clear All Memory for RAM < 128GB
         if ram_gb > 0 and ram_gb < 128:
-            delete_text_encoder_update = gr.update(value=True)
-            optimization_messages.append(f"RAM {ram_gb:.1f}GB < 128GB → Enabled Delete T5 After Encoding")
-            print(f"  ✓ RAM optimization: Enabled Delete T5 After Encoding (RAM: {ram_gb:.1f}GB < 128GB)")
+            clear_all_update = gr.update(value=True)
+            optimization_messages.append(f"RAM {ram_gb:.1f}GB < 128GB → Enabled Clear All Memory")
+            print(f"  ✓ RAM optimization: Enabled Clear All Memory (RAM: {ram_gb:.1f}GB < 128GB)")
 
         # VRAM-based optimizations (same as before)
         if vram_gb > 0:
@@ -3673,7 +3663,7 @@ def process_batch_generation(
                         'audio_negative_prompt': audio_negative_prompt,
                         'use_image_gen': False,
                         'cpu_offload': cpu_offload,
-                        'delete_text_encoder': delete_text_encoder,
+                        'delete_text_encoder': False,  # Set to False in subprocess (T5 already encoded in main process or subprocess)
                         'fp8_t5': fp8_t5,
                         'cpu_only_t5': cpu_only_t5,
                         'fp8_base_model': fp8_base_model,
@@ -4434,8 +4424,8 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height):
 theme = gr.themes.Soft()
 theme.font = ["Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v7.31 : https://www.patreon.com/posts/140393220")
-    print("Ovi Pro SECourses Premium App v7.3")
+    gr.Markdown("# Ovi Pro SECourses Premium App v7.4 : https://www.patreon.com/posts/140393220")
+    print("Ovi Pro SECourses Premium App v7.4")
     image_to_use = gr.State(value=None)
     input_video_state = gr.State(value=None)  # Store input video path for merging
     original_image_path = gr.State(value=None)  # Store original uploaded image path (never changes until new upload)
@@ -5982,7 +5972,7 @@ if __name__ == "__main__":
             'audio_negative_prompt': 'robotic, muffled, echo, distorted',
             'use_image_gen': False,
             'cpu_offload': True,
-            'delete_text_encoder': True,
+            'delete_text_encoder': False,  # Set to False in subprocess (subprocess already isolated)
             'fp8_t5': False,
             'cpu_only_t5': False,
             'fp8_base_model': False,
