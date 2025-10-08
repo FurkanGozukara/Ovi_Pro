@@ -93,7 +93,7 @@ class OviFusionEngine:
     def _encode_text_and_cleanup(self, text_prompt, video_negative_prompt, audio_negative_prompt, delete_text_encoder=True, use_subprocess=True):
         """
         Encode text prompts and optionally delete T5 to save VRAM during generation.
-        This is the FIRST operation after loading models.
+        This is called ONLY when cache miss - cache check happens in generate().
         Uses instance variables self.fp8_t5 and self.cpu_only_t5 for configuration.
         
         Args:
@@ -103,6 +103,7 @@ class OviFusionEngine:
             delete_text_encoder: If True, delete T5 after encoding to save memory
             use_subprocess: If True and delete_text_encoder=True, run T5 encoding in subprocess for 100% guaranteed memory cleanup
         """
+        
         # CRITICAL: Only use subprocess if no other heavy models are loaded yet
         # This prevents duplicate memory usage (T5 in subprocess + fusion model in main process)
         can_use_subprocess = (
@@ -767,6 +768,12 @@ class OviFusionEngine:
         self.vae_tile_size = vae_tile_size
         self.vae_tile_overlap = vae_tile_overlap
         
+        # ============================================================================
+        # SMART CACHE: Check cache BEFORE loading anything
+        # ============================================================================
+        text_embeddings = None
+        cache_key = None
+        
         # Check if pre-encoded text embeddings are provided (from T5 subprocess)
         if text_embeddings_cache is not None:
             print("=" * 80)
@@ -778,16 +785,42 @@ class OviFusionEngine:
             # Move embeddings to target device and dtype if needed
             text_embeddings = [emb.to(self.target_dtype).to(self.device) for emb in text_embeddings_cache]
             print(f"[DEBUG] Embeddings moved to device: {self.device}, dtype: {self.target_dtype}")
-            
-            # Directly load fusion model (skip T5 steps entirely)
-            print("=" * 80)
-            print("Loading fusion model (T5 subprocess already completed)")
-            print("T5 will NOT be loaded - using cached embeddings only")
-            print("=" * 80)
-            self._load_models(no_block_prep=no_block_prep, load_text_encoder=False)
         else:
-            # Original T5 loading and encoding flow
-            print("[DEBUG] text_embeddings_cache is None - will load T5")
+            # Check disk cache BEFORE loading T5
+            try:
+                import sys
+                import os
+                parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                if parent_dir not in sys.path:
+                    sys.path.insert(0, parent_dir)
+                
+                from premium import get_t5_cache_key, load_t5_cached_embeddings, save_t5_cached_embeddings
+                
+                cache_key = get_t5_cache_key(text_prompt, video_negative_prompt, audio_negative_prompt, self.fp8_t5)
+                print(f"[T5 CACHE] Cache key: {cache_key}")
+                
+                cached_embeddings = load_t5_cached_embeddings(cache_key)
+                
+                if cached_embeddings is not None:
+                    # Cache hit - use cached embeddings, skip T5 entirely
+                    print("=" * 80)
+                    print("T5 CACHE HIT - SKIPPING T5 LOADING ENTIRELY")
+                    print("Using cached embeddings from disk")
+                    print("=" * 80)
+                    
+                    # Move embeddings to target device and dtype
+                    text_embeddings = [emb.to(self.target_dtype).to(self.device) for emb in cached_embeddings]
+            except Exception as e:
+                print(f"[T5 CACHE] Cache check failed: {e}, will load T5 normally")
+                cache_key = None
+        
+        # ============================================================================
+        # Load and encode T5 only if cache miss
+        # ============================================================================
+        if text_embeddings is None:
+            # Cache miss or no cache - need to load and encode T5
+            print("[DEBUG] No cached embeddings - will load T5")
+            
             # Step 1: Load ONLY T5 (or use existing if already loaded)
             if self.text_model is None:
                 print("=" * 80)
@@ -804,14 +837,24 @@ class OviFusionEngine:
                 text_prompt, 
                 video_negative_prompt, 
                 audio_negative_prompt, 
-                delete_text_encoder
+                delete_text_encoder,
+                use_subprocess=False  # Already checked cache, don't check again
             )
             
-            # Step 3: NOW load the fusion model (T5 is already deleted if enabled)
-            print("=" * 80)
-            print("STEP 3/3: Loading fusion model (T5 already deleted if enabled)")
-            print("=" * 80)
-            self._load_models(no_block_prep=no_block_prep, load_text_encoder=False)
+            # Save to cache after encoding
+            if cache_key is not None:
+                try:
+                    save_t5_cached_embeddings(cache_key, text_embeddings)
+                except Exception as e:
+                    print(f"[T5 CACHE] Failed to save cache: {e}")
+        
+        # ============================================================================
+        # Load fusion model (T5 either never loaded or already deleted)
+        # ============================================================================
+        print("=" * 80)
+        print("Loading fusion model (T5 skipped or deleted)")
+        print("=" * 80)
+        self._load_models(no_block_prep=no_block_prep, load_text_encoder=False)
         
         # Split embeddings for later use
         text_embeddings_video_pos = text_embeddings[0]
