@@ -184,7 +184,7 @@ def calculate_lora_weight(lora_down: torch.Tensor, lora_up: torch.Tensor,
 
 def merge_lora_into_model(model: nn.Module, lora_sd: Dict[str, torch.Tensor], 
                           scale: float, model_dtype: torch.dtype = torch.bfloat16,
-                          device: str = 'cpu') -> Tuple[int, int]:
+                          device: str = 'cpu') -> Tuple[int, int, str, str]:
     """
     Merge LoRA weights into model parameters layer by layer (memory efficient)
     
@@ -196,11 +196,11 @@ def merge_lora_into_model(model: nn.Module, lora_sd: Dict[str, torch.Tensor],
         device: Device for processing ('cpu' recommended for merging)
     
     Returns:
-        Tuple of (matched_layers, total_lora_keys)
+        Tuple of (matched_layers, total_lora_keys, model_device, model_dtype_str)
     """
     if scale == 0.0:
         logging.warning(f"LoRA scale is 0.0, skipping merge")
-        return (0, len(lora_sd))
+        return (0, len(lora_sd), "unknown", "unknown")
     
     matched_layers = 0
     total_keys = 0
@@ -224,9 +224,27 @@ def merge_lora_into_model(model: nn.Module, lora_sd: Dict[str, torch.Tensor],
     
     total_keys = len(lora_base_keys)
     
+    # DIAGNOSTIC: Check where model parameters are located
+    first_param_checked = False
+    model_device = None
+    model_actual_dtype = None
+    
     # Process each layer
     with tqdm(total=len(model_params), desc="Merging LoRA layers", leave=True) as pbar:
         for param_name, param in model_params.items():
+            # Diagnostic check on first parameter
+            if not first_param_checked:
+                model_device = param.device
+                model_actual_dtype = param.dtype
+                first_param_checked = True
+                if PROFILE_LORA_MERGE:
+                    logging.info(f"LoRA merge: Model parameters are on device={model_device}, dtype={model_actual_dtype}")
+                    if str(model_device) != device:
+                        logging.warning(
+                            f"LoRA merge: PERFORMANCE WARNING! Model is on {model_device} but merging on {device}. "
+                            f"This will cause slow GPU<->CPU transfers for each layer!"
+                        )
+            
             # Try to match with LoRA keys
             base_key = param_name.replace('.weight', '').replace('.bias', '')
             
@@ -272,7 +290,8 @@ def merge_lora_into_model(model: nn.Module, lora_sd: Dict[str, torch.Tensor],
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     
-    return (matched_layers, total_keys)
+    return (matched_layers, total_keys, str(model_device) if model_device is not None else "unknown", 
+            str(model_actual_dtype) if model_actual_dtype is not None else "unknown")
 
 
 def merge_multiple_loras(model: nn.Module, lora_specs: List[Tuple[str, float]], 
@@ -318,6 +337,8 @@ def merge_multiple_loras(model: nn.Module, lora_specs: List[Tuple[str, float]],
     
     total_matched = 0
     total_keys = 0
+    detected_model_device = None
+    detected_model_dtype = None
     
     timing_info = [] if PROFILE_LORA_MERGE else None
     process = psutil.Process() if PROFILE_LORA_MERGE else None
@@ -343,8 +364,13 @@ def merge_multiple_loras(model: nn.Module, lora_specs: List[Tuple[str, float]],
         
         # Merge into model
         start_merge = time.perf_counter() if PROFILE_LORA_MERGE else None
-        matched, keys = merge_lora_into_model(model, lora_sd, scale, model_dtype, device)
+        matched, keys, model_dev, model_dt = merge_lora_into_model(model, lora_sd, scale, model_dtype, device)
         merge_duration = time.perf_counter() - start_merge if PROFILE_LORA_MERGE else None
+        
+        # Capture device/dtype info from first LoRA
+        if detected_model_device is None:
+            detected_model_device = model_dev
+            detected_model_dtype = model_dt
         
         total_matched += matched
         total_keys += keys
@@ -368,6 +394,13 @@ def merge_multiple_loras(model: nn.Module, lora_specs: List[Tuple[str, float]],
 
     if PROFILE_LORA_MERGE and timing_info:
         print("LoRA merge profiling summary (set OVI_LORA_PROFILE=0 to disable):")
+        
+        # Check if we detected model device during merge
+        if detected_model_device is not None and detected_model_device != "unknown":
+            print(f"  Model device: {detected_model_device} | Model dtype: {detected_model_dtype} | Merge device: {device}")
+            if detected_model_device != device:
+                print(f"  ⚠️  WARNING: Model on {detected_model_device} but merging on {device} - causing GPU<->CPU transfers!")
+        
         total_merge = sum(entry["merge_s"] for entry in timing_info if entry["merge_s"] is not None)
         total_load = sum(entry["load_s"] for entry in timing_info if entry["load_s"] is not None)
         total_standardize = sum(entry["standardize_s"] for entry in timing_info if entry["standardize_s"] is not None)
