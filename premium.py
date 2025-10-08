@@ -142,6 +142,7 @@ print(f"[DEBUG] Parsed args: single_generation={bool(args.single_generation)}, s
 
 # Initialize engines with lazy loading (no models loaded yet)
 ovi_engine = None  # Will be initialized on first generation
+ovi_engine_duration = None  # Track duration used to initialize engine
 
 # Global cancellation flag for stopping generations
 cancel_generation = False
@@ -1281,6 +1282,15 @@ def generate_video(
             print("  VRAM/RAM will be completely cleared between generations")
             print("=" * 80)
 
+        # Check if duration has changed - if so, force engine reinitialization
+        global ovi_engine, ovi_engine_duration
+        if not clear_all and ovi_engine is not None and ovi_engine_duration != duration_seconds:
+            print("=" * 80)
+            print(f"DURATION CHANGED: {ovi_engine_duration}s → {duration_seconds}s")
+            print("  Forcing engine reinitialization with new latent lengths")
+            print("=" * 80)
+            ovi_engine = None  # Force reinitialization
+
         if not clear_all and ovi_engine is None:
             # Use CLI args only in test mode, otherwise use GUI parameters
             if getattr(args, 'test', False):
@@ -1310,6 +1320,7 @@ def generate_video(
                 video_latent_length=video_latent_length,
                 audio_latent_length=audio_latent_length
             )
+            ovi_engine_duration = duration_seconds  # Store duration used for initialization
             print("\n[OK] OviFusionEngine initialized successfully (models will load on first generation)")
 
         image_path = None
@@ -3429,6 +3440,15 @@ def process_batch_generation(
             print("  VRAM/RAM will be completely cleared between each batch item")
             print("=" * 80)
 
+        # Check if duration has changed - if so, force engine reinitialization
+        global ovi_engine, ovi_engine_duration
+        if not clear_all and ovi_engine is not None and ovi_engine_duration != duration_seconds:
+            print("=" * 80)
+            print(f"DURATION CHANGED: {ovi_engine_duration}s → {duration_seconds}s")
+            print("  Forcing engine reinitialization with new latent lengths")
+            print("=" * 80)
+            ovi_engine = None  # Force reinitialization
+
         if not clear_all and ovi_engine is None:
             # Use CLI args only in test mode, otherwise use GUI parameters
             if getattr(args, 'test', False):
@@ -3457,6 +3477,7 @@ def process_batch_generation(
                 video_latent_length=video_latent_length,
                 audio_latent_length=audio_latent_length
             )
+            ovi_engine_duration = duration_seconds  # Store duration used for initialization
             print("\n[OK] OviFusionEngine initialized successfully for batch processing")
 
         processed_count = 0
