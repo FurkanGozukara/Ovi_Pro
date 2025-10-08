@@ -1,8 +1,19 @@
+import os
+import sys
+
+# CRITICAL: Set MKL/OpenMP thread environment variables BEFORE importing torch
+# MKL ignores torch.set_num_threads() if these aren't set at import time
+# This fixes 100-200x slowdowns on some systems where MKL defaults to 1-2 threads
+cpu_count = os.cpu_count()
+if cpu_count and 'OMP_NUM_THREADS' not in os.environ:
+    os.environ['OMP_NUM_THREADS'] = str(cpu_count)
+    os.environ['MKL_NUM_THREADS'] = str(cpu_count)
+    os.environ['OPENBLAS_NUM_THREADS'] = str(cpu_count)
+    print(f"[STARTUP] Set MKL/OMP threads to {cpu_count} for optimal CPU performance")
+
 import gradio as gr
 import torch
 import argparse
-import os
-import sys
 import signal
 from datetime import datetime
 
@@ -4424,8 +4435,8 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height):
 theme = gr.themes.Soft()
 theme.font = ["Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v7.42 : https://www.patreon.com/posts/140393220")
-    print("Ovi Pro SECourses Premium App v7.42")
+    gr.Markdown("# Ovi Pro SECourses Premium App v7.5 : https://www.patreon.com/posts/140393220")
+    print("Ovi Pro SECourses Premium App v7.5")
     image_to_use = gr.State(value=None)
     input_video_state = gr.State(value=None)  # Store input video path for merging
     original_image_path = gr.State(value=None)  # Store original uploaded image path (never changes until new upload)

@@ -191,7 +191,7 @@ def calculate_lora_weight(lora_down: torch.Tensor, lora_up: torch.Tensor,
 
 def merge_lora_into_model(model: nn.Module, lora_sd: Dict[str, torch.Tensor], 
                           scale: float, model_dtype: torch.dtype = torch.bfloat16,
-                          device: str = 'cpu') -> Tuple[int, int, str, str]:
+                          device: str = 'cpu', force_float32_cpu: bool = False) -> Tuple[int, int, str, str]:
     """
     Merge LoRA weights into model parameters layer by layer (memory efficient)
     
@@ -262,10 +262,14 @@ def merge_lora_into_model(model: nn.Module, lora_sd: Dict[str, torch.Tensor],
                 lora_down, lora_up, alpha = lora_weights
                 
                 try:
+                    # Use float32 on CPU if bfloat16 is broken on this system
+                    # Some PyTorch builds have catastrophically slow bfloat16 CPU matmul
+                    compute_dtype = torch.float32 if (device == 'cpu' and force_float32_cpu) else model_dtype
+                    
                     # Move to processing device and dtype
-                    param_data = param.data.to(device=device, dtype=model_dtype)
-                    lora_down = lora_down.to(device=device, dtype=model_dtype)
-                    lora_up = lora_up.to(device=device, dtype=model_dtype)
+                    param_data = param.data.to(device=device, dtype=compute_dtype)
+                    lora_down = lora_down.to(device=device, dtype=compute_dtype)
+                    lora_up = lora_up.to(device=device, dtype=compute_dtype)
                     
                     # Calculate LoRA delta
                     lora_delta = calculate_lora_weight(lora_down, lora_up, alpha, scale)
@@ -276,6 +280,10 @@ def merge_lora_into_model(model: nn.Module, lora_sd: Dict[str, torch.Tensor],
                     
                     # Merge: weight = weight + lora_delta
                     param_data = param_data + lora_delta
+                    
+                    # Convert back to original dtype if we used float32 for computation
+                    if compute_dtype != param.dtype:
+                        param_data = param_data.to(dtype=param.dtype)
                     
                     # Update parameter in-place
                     param.data = param_data
@@ -335,6 +343,9 @@ def merge_multiple_loras(model: nn.Module, lora_specs: List[Tuple[str, float]],
     optimal_threads = cpu_count_logical if cpu_count_logical else cpu_count_physical
     torch.set_num_threads(optimal_threads)
     
+    # Auto-detect broken bfloat16 on CPU (PyTorch 2.8.x bug on some systems)
+    use_float32_workaround = False
+    
     if PROFILE_LORA_MERGE:
         if original_torch_threads != optimal_threads:
             logging.info(
@@ -342,26 +353,49 @@ def merge_multiple_loras(model: nn.Module, lora_specs: List[Tuple[str, float]],
                 f"(using all {cpu_count_logical} logical cores for optimal matrix multiplication)"
             )
         
-        # Quick benchmark to test torch.mm() performance on this system
+        # Quick benchmark to test torch.mm() performance and detect broken bfloat16
         logging.info("Running quick torch.mm() benchmark to test CPU performance...")
-        test_size = 2048
-        test_a = torch.randn(test_size, test_size, dtype=torch.bfloat16)
-        test_b = torch.randn(test_size, test_size, dtype=torch.bfloat16)
+        test_size = 1024  # Smaller size for faster test
         
-        # Warm-up
-        _ = torch.mm(test_a, test_b)
+        # Test bfloat16 performance
+        test_a_bf16 = torch.randn(test_size, test_size, dtype=torch.bfloat16)
+        test_b_bf16 = torch.randn(test_size, test_size, dtype=torch.bfloat16)
+        _ = torch.mm(test_a_bf16, test_b_bf16)  # Warm-up
         
-        # Actual benchmark
         bench_start = time.perf_counter()
-        for _ in range(10):
-            _ = torch.mm(test_a, test_b)
-        bench_elapsed = time.perf_counter() - bench_start
-        ops_per_sec = 10 / bench_elapsed
+        for _ in range(5):
+            _ = torch.mm(test_a_bf16, test_b_bf16)
+        bench_elapsed_bf16 = time.perf_counter() - bench_start
+        ops_per_sec_bf16 = 5 / bench_elapsed_bf16
         
-        logging.info(f"Benchmark: {ops_per_sec:.2f} matrix multiplies/sec ({bench_elapsed*1000/10:.1f}ms per op)")
-        logging.info(f"Expected on modern CPU: 15-30 ops/sec | If below 5 ops/sec, system has severe performance issues")
+        # Test float32 as reference
+        test_a_f32 = torch.randn(test_size, test_size, dtype=torch.float32)
+        test_b_f32 = torch.randn(test_size, test_size, dtype=torch.float32)
+        _ = torch.mm(test_a_f32, test_b_f32)  # Warm-up
         
-        del test_a, test_b
+        bench_start = time.perf_counter()
+        for _ in range(5):
+            _ = torch.mm(test_a_f32, test_b_f32)
+        bench_elapsed_f32 = time.perf_counter() - bench_start
+        ops_per_sec_f32 = 5 / bench_elapsed_f32
+        
+        logging.info(f"Benchmark bfloat16: {ops_per_sec_bf16:.2f} ops/sec ({bench_elapsed_bf16*1000/5:.1f}ms per op)")
+        logging.info(f"Benchmark float32:  {ops_per_sec_f32:.2f} ops/sec ({bench_elapsed_f32*1000/5:.1f}ms per op)")
+        
+        # Detect if bfloat16 is broken (>10x slower than float32)
+        if ops_per_sec_bf16 < 5 and ops_per_sec_f32 > 50:
+            use_float32_workaround = True  # Enable workaround
+            logging.warning(
+                f"⚠ DETECTED: bfloat16 CPU matmul is catastrophically slow on this system!"
+            )
+            logging.warning(
+                f"   Automatically enabling float32 workaround for LoRA merging"
+            )
+            logging.warning(
+                f"   Recommendation: Downgrade PyTorch to 2.4.x or 2.5.x (current: {torch.__version__})"
+            )
+        
+        del test_a_bf16, test_b_bf16, test_a_f32, test_b_f32
     
     total_matched = 0
     total_keys = 0
@@ -392,7 +426,10 @@ def merge_multiple_loras(model: nn.Module, lora_specs: List[Tuple[str, float]],
         
         # Merge into model
         start_merge = time.perf_counter() if PROFILE_LORA_MERGE else None
-        matched, keys, model_dev, model_dt = merge_lora_into_model(model, lora_sd, scale, model_dtype, device)
+        matched, keys, model_dev, model_dt = merge_lora_into_model(
+            model, lora_sd, scale, model_dtype, device,
+            force_float32_cpu=use_float32_workaround
+        )
         merge_duration = time.perf_counter() - start_merge if PROFILE_LORA_MERGE else None
         
         # Capture device/dtype info from first LoRA
