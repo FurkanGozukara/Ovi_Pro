@@ -1140,19 +1140,6 @@ def generate_video(
             print(f"  - {os.path.basename(path)}: scale={scale}, layers={layers}")
         print("=" * 80)
 
-    # CRITICAL: Validate prompt format before any processing (unless disabled)
-    if not disable_auto_prompt_validation:
-        is_valid, error_message = validate_prompt_format(text_prompt)
-        if not is_valid:
-            print("=" * 80)
-            print("PROMPT VALIDATION FAILED")
-            print(error_message)
-            print("=" * 80)
-            raise ValueError(f"Invalid prompt format:\n\n{error_message}")
-    else:
-        print("=" * 80)
-        print("AUTO PROMPT VALIDATION DISABLED - Proceeding with validation bypass")
-        print("=" * 80)
 
     # Store original duration before any overrides
     original_duration_seconds = duration_seconds
@@ -1166,6 +1153,21 @@ def generate_video(
 
     # Parse prompts for video extension validation (always parse to count lines)
     validation_prompts = parse_multiline_prompts(text_prompt, True)  # Always parse for validation
+
+    # Validate prompt format if validation is enabled
+    if not disable_auto_prompt_validation:
+        # Check if prompt contains at least one <S>...<E> pair (unless disabled)
+        is_valid, error_message = validate_prompt_format(text_prompt)
+        if not is_valid:
+            print("=" * 80)
+            print("PROMPT VALIDATION FAILED")
+            print(error_message)
+            print("=" * 80)
+            raise ValueError(f"Invalid prompt format:\n\n{error_message}")
+    else:
+        print("=" * 80)
+        print("AUTO PROMPT VALIDATION DISABLED - Proceeding with validation bypass")
+        print("=" * 80)
 
     # Calculate video extension count based on enable_video_extension setting
     video_extension_count = 0
@@ -1229,21 +1231,23 @@ def generate_video(
     if enable_multiline_prompts:
         # When multi-line prompts enabled: generate separate videos for each prompt line
         individual_prompts = parse_multiline_prompts(text_prompt, enable_multiline_prompts)
-        # Validate each individual prompt line
-        for i, prompt_line in enumerate(individual_prompts):
-            line_valid, line_error = validate_prompt_format(prompt_line)
-            if not line_valid:
-                raise ValueError(f"Invalid prompt format in line {i+1}:\n\n{line_error}")
+        # Validate each individual prompt line (unless disabled)
+        if not disable_auto_prompt_validation:
+            for i, prompt_line in enumerate(individual_prompts):
+                line_valid, line_error = validate_prompt_format(prompt_line)
+                if not line_valid:
+                    raise ValueError(f"Invalid prompt format in line {i+1}:\n\n{line_error}")
         # Disable video extensions when multi-line prompts are enabled
         video_extension_count = 0
     elif enable_video_extension and video_extension_count > 0:
         # When video extension enabled: only use the first prompt for the main generation
         individual_prompts = [validation_prompts[0]]  # Only first prompt for main generation
-        # Validate each extension prompt line
-        for i, prompt_line in enumerate(validation_prompts):
-            line_valid, line_error = validate_prompt_format(prompt_line)
-            if not line_valid:
-                raise ValueError(f"Invalid prompt format in line {i+1} (used for extension {i if i > 0 else 'main'}):\n\n{line_error}")
+        # Validate each extension prompt line (unless disabled)
+        if not disable_auto_prompt_validation:
+            for i, prompt_line in enumerate(validation_prompts):
+                line_valid, line_error = validate_prompt_format(prompt_line)
+                if not line_valid:
+                    raise ValueError(f"Invalid prompt format in line {i+1} (used for extension {i if i > 0 else 'main'}):\n\n{line_error}")
     else:
         # Default: single prompt
         individual_prompts = parse_multiline_prompts(text_prompt, False)
@@ -4335,7 +4339,7 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height):
 theme = gr.themes.Soft()
 theme.font = ["Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v6.4 : https://www.patreon.com/posts/140393220")
+    gr.Markdown("# Ovi Pro SECourses Premium App v7.0 : https://www.patreon.com/posts/140393220")
 
     image_to_use = gr.State(value=None)
     input_video_state = gr.State(value=None)  # Store input video path for merging
