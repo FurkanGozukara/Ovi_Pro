@@ -168,6 +168,13 @@ def calculate_lora_weight(lora_down: torch.Tensor, lora_up: torch.Tensor,
     if lora_up.dim() > 2:
         lora_up = lora_up.flatten(start_dim=1)
     
+    # CRITICAL: Ensure tensors are contiguous for optimal MKL performance
+    # Non-contiguous tensors can cause 100-200x slowdowns in matrix multiplication
+    if not lora_down.is_contiguous():
+        lora_down = lora_down.contiguous()
+    if not lora_up.is_contiguous():
+        lora_up = lora_up.contiguous()
+    
     # Calculate LoRA weight
     lora_weight = torch.mm(lora_up, lora_down)
     
@@ -334,6 +341,27 @@ def merge_multiple_loras(model: nn.Module, lora_specs: List[Tuple[str, float]],
                 f"LoRA merge: Auto-configured PyTorch intra-op threads: {original_torch_threads} → {optimal_threads} "
                 f"(using all {cpu_count_logical} logical cores for optimal matrix multiplication)"
             )
+        
+        # Quick benchmark to test torch.mm() performance on this system
+        logging.info("Running quick torch.mm() benchmark to test CPU performance...")
+        test_size = 2048
+        test_a = torch.randn(test_size, test_size, dtype=torch.bfloat16)
+        test_b = torch.randn(test_size, test_size, dtype=torch.bfloat16)
+        
+        # Warm-up
+        _ = torch.mm(test_a, test_b)
+        
+        # Actual benchmark
+        bench_start = time.perf_counter()
+        for _ in range(10):
+            _ = torch.mm(test_a, test_b)
+        bench_elapsed = time.perf_counter() - bench_start
+        ops_per_sec = 10 / bench_elapsed
+        
+        logging.info(f"Benchmark: {ops_per_sec:.2f} matrix multiplies/sec ({bench_elapsed*1000/10:.1f}ms per op)")
+        logging.info(f"Expected on modern CPU: 15-30 ops/sec | If below 5 ops/sec, system has severe performance issues")
+        
+        del test_a, test_b
     
     total_matched = 0
     total_keys = 0
