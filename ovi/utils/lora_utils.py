@@ -10,6 +10,16 @@ from safetensors.torch import load_file
 from typing import Dict, List, Tuple, Optional
 import logging
 from tqdm import tqdm
+import time
+import statistics
+import psutil
+
+# LoRA merge profiling is enabled by default; set OVI_LORA_PROFILE=0 to disable
+_lora_profile_flag = os.environ.get("OVI_LORA_PROFILE")
+if _lora_profile_flag is None:
+    PROFILE_LORA_MERGE = True
+else:
+    PROFILE_LORA_MERGE = _lora_profile_flag.lower() not in ("0", "false")
 
 
 def scan_lora_files(lora_folders: List[str]) -> List[Tuple[str, str]]:
@@ -286,19 +296,34 @@ def merge_multiple_loras(model: nn.Module, lora_specs: List[Tuple[str, float]],
     total_matched = 0
     total_keys = 0
     
-    for lora_path, scale in lora_specs:
+    timing_info = [] if PROFILE_LORA_MERGE else None
+    process = psutil.Process() if PROFILE_LORA_MERGE else None
+    torch_threads = torch.get_num_threads() if PROFILE_LORA_MERGE else None
+    torch_interop_threads = torch.get_num_interop_threads() if PROFILE_LORA_MERGE else None
+    cpu_count_logical = psutil.cpu_count(logical=True) if PROFILE_LORA_MERGE else None
+    cpu_count_physical = psutil.cpu_count(logical=False) if PROFILE_LORA_MERGE else None
+    affinity = process.cpu_affinity() if PROFILE_LORA_MERGE and hasattr(process, "cpu_affinity") else None
+
+    for lora_index, (lora_path, scale) in enumerate(lora_specs, start=1):
         if scale == 0.0:
             logging.info(f"Skipping LoRA {os.path.basename(lora_path)} (scale=0.0)")
             continue
         
         logging.info(f"Loading LoRA: {os.path.basename(lora_path)} (scale={scale})")
         
+        start_load = time.perf_counter() if PROFILE_LORA_MERGE else None
         # Load and standardize LoRA
         lora_sd = load_lora_weights(lora_path)
+        load_duration = time.perf_counter() - start_load if PROFILE_LORA_MERGE else None
+
+        start_standardize = time.perf_counter() if PROFILE_LORA_MERGE else None
         lora_sd = standardize_lora_keys(lora_sd)
+        standardize_duration = time.perf_counter() - start_standardize if PROFILE_LORA_MERGE else None
         
         # Merge into model
+        start_merge = time.perf_counter() if PROFILE_LORA_MERGE else None
         matched, keys = merge_lora_into_model(model, lora_sd, scale, model_dtype, device)
+        merge_duration = time.perf_counter() - start_merge if PROFILE_LORA_MERGE else None
         
         total_matched += matched
         total_keys += keys
@@ -307,6 +332,52 @@ def merge_multiple_loras(model: nn.Module, lora_specs: List[Tuple[str, float]],
         
         # Clean up
         del lora_sd
+
+        if PROFILE_LORA_MERGE:
+            timing_info.append({
+                "index": lora_index,
+                "name": os.path.basename(lora_path),
+                "load_s": load_duration,
+                "standardize_s": standardize_duration,
+                "merge_s": merge_duration,
+                "matched_layers": matched,
+                "total_layers": keys,
+                "proc_threads": process.num_threads() if process is not None else None,
+            })
+
+    if PROFILE_LORA_MERGE and timing_info:
+        print("LoRA merge profiling summary (set OVI_LORA_PROFILE=0 to disable):")
+        total_merge = sum(entry["merge_s"] for entry in timing_info if entry["merge_s"] is not None)
+        total_load = sum(entry["load_s"] for entry in timing_info if entry["load_s"] is not None)
+        total_standardize = sum(entry["standardize_s"] for entry in timing_info if entry["standardize_s"] is not None)
+        per_lora_totals = [
+            (entry["merge_s"] or 0.0) + (entry["load_s"] or 0.0) + (entry["standardize_s"] or 0.0)
+            for entry in timing_info
+        ]
+        avg_total = statistics.mean(per_lora_totals) if per_lora_totals else 0.0
+        max_total = max(per_lora_totals) if per_lora_totals else 0.0
+
+        for entry in timing_info:
+            print(
+                f"  [LoRA {entry['index']}] {entry['name']} | "
+                f"load: {entry['load_s']:.3f}s | "
+                f"standardize: {entry['standardize_s']:.3f}s | "
+                f"merge: {entry['merge_s']:.3f}s | "
+                f"matched {entry['matched_layers']}/{entry['total_layers']} | "
+                f"proc threads: {entry['proc_threads']}"
+            )
+        print(
+            f"  Summary • total merge: {total_merge:.3f}s | total load: {total_load:.3f}s | "
+            f"total standardize: {total_standardize:.3f}s | avg per LoRA: {avg_total:.3f}s | max per LoRA: {max_total:.3f}s"
+        )
+        if torch_threads is not None:
+            print(
+                f"  Torch threads: intra={torch_threads} inter-op={torch_interop_threads} | "
+                f"Process threads: {process.num_threads() if process else 'n/a'} | "
+                f"CPU cores: logical={cpu_count_logical} physical={cpu_count_physical}"
+            )
+        if affinity:
+            print(f"  CPU affinity: {affinity}")
     
     return {
         "total_loras": len([s for s in lora_specs if s[1] != 0.0]),
