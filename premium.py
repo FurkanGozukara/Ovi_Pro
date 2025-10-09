@@ -4553,8 +4553,8 @@ Check the console output for detailed error information and verify your input fi
 theme = gr.themes.Soft()
 theme.font = ["Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v7.6 : https://www.patreon.com/posts/140393220")
-    print("Ovi Pro SECourses Premium App v7.6")
+    gr.Markdown("# Ovi Pro SECourses Premium App v7.7 : https://www.patreon.com/posts/140393220")
+    print("Ovi Pro SECourses Premium App v7.7")
     image_to_use = gr.State(value=None)
     input_video_state = gr.State(value=None)  # Store input video path for merging
     original_image_path = gr.State(value=None)  # Store original uploaded image path (never changes until new upload)
@@ -5494,14 +5494,22 @@ with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
                             gr.Textbox(
                                 value=example,
                                 label=f"T2V Example {i+1}",
-                                lines=6,
+                                lines=2,
                                 interactive=False
                             )
                         with gr.Column(scale=1):
                             load_btn = gr.Button(f"Load Example {i+1}", size="lg")
                             load_btn.click(
-                                fn=lambda prompt=example: (prompt, None, None, gr.update(selected="generate")),
-                                outputs=[video_text_prompt, image, image_to_use, main_tabs]
+                                fn=lambda prompt=example: (
+                                    prompt,
+                                    None,
+                                    None,
+                                    gr.update(value=False),
+                                    gr.update(value=True),
+                                    gr.update(selected="generate")
+                                ),
+                                outputs=[video_text_prompt, image, image_to_use, enable_multiline_prompts, enable_video_extension, main_tabs],
+                                js="() => window.scrollTo({ top: 0, behavior: 'smooth' })"
                             )
 
             with gr.TabItem("Image-to-Video Examples"):
@@ -5514,18 +5522,106 @@ with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
                             gr.Textbox(
                                 value=prompt,
                                 label=f"I2V Example {i+1}",
-                                lines=6,
+                                lines=7,
                                 interactive=False
                             )
-                            if img_path and os.path.exists(img_path):
-                                gr.Image(value=img_path, label="Starting Image", height=150)
-                            else:
-                                gr.Markdown("*Image not found*")
+                        with gr.Column(scale=1):
+                            gr.Image(value=img_path if img_path and os.path.exists(img_path) else None,
+                                     label="Starting Image",
+                                     height=150)
                         with gr.Column(scale=1):
                             load_btn = gr.Button(f"Load Example {i+1}", size="lg")
                             load_btn.click(
                                 fn=lambda p=prompt, img=img_path: load_i2v_example_with_resolution(p, img) + (gr.update(selected="generate"),),
-                                outputs=[video_text_prompt, image, aspect_ratio, video_width, video_height, image_to_use, main_tabs]
+                                outputs=[video_text_prompt, image, aspect_ratio, video_width, video_height, image_to_use, main_tabs],
+                                js="() => window.scrollTo({ top: 0, behavior: 'smooth' })"
+                            )
+
+            with gr.TabItem("T2V Video Extend Examples"):
+                gr.Markdown("### T2V Video Extend Examples")
+                gr.Markdown("Prompts designed for staged, multi-line extensions. Each loads in three segments for sequential video extension.")
+
+                try:
+                    extend_df = pd.read_csv("example_prompts/gpt_examples_t2v_extend.csv")
+                    extend_examples = extend_df["text_prompt"].tolist()
+                except Exception as e:
+                    print(f"[WARN] Failed to load T2V extend examples: {e}")
+                    extend_examples = []
+
+                try:
+                    i2v_extend_df = pd.read_csv("example_prompts/gpt_examples_i2v_extend.csv")
+                    i2v_extend_examples = [
+                        (row.get("text_prompt", ""), row.get("image_path", ""))
+                        for _, row in i2v_extend_df.iterrows()
+                    ]
+                except Exception as e:
+                    print(f"[WARN] Failed to load I2V extend examples: {e}")
+                    i2v_extend_examples = []
+
+                for i, example in enumerate(extend_examples):
+                    with gr.Row():
+                        with gr.Column(scale=3):
+                            gr.Textbox(
+                                value=example,
+                                label=f"Extend Example {i+1}",
+                                lines=7,
+                                interactive=False
+                            )
+                        with gr.Column(scale=1):
+                            load_btn = gr.Button(f"Load Example {i+1}", size="lg")
+                            load_btn.click(
+                                fn=lambda prompt=example: (
+                                    prompt,
+                                    None,
+                                    None,
+                                    gr.update(value=False),
+                                    gr.update(value=True),
+                                    gr.update(selected="generate")
+                                ),
+                                outputs=[video_text_prompt, image, image_to_use, enable_multiline_prompts, enable_video_extension, main_tabs],
+                                js="() => window.scrollTo({ top: 0, behavior: 'smooth' })"
+                            )
+
+            with gr.TabItem("I2V Video Extend Examples"):
+                gr.Markdown("### I2V Video Extend Examples")
+                gr.Markdown("Image-driven prompts staged for extension. Loading one prepares the workflow automatically.")
+
+                for i, (prompt, img_path) in enumerate(i2v_extend_examples):
+                    with gr.Row():
+                        with gr.Column(scale=3):
+                            gr.Textbox(
+                                value=prompt,
+                                label=f"I2V Extend Example {i+1}",
+                                lines=9,
+                                interactive=False
+                            )
+                        with gr.Column(scale=1):
+                            has_image = bool(img_path and os.path.exists(img_path))
+                            gr.Image(
+                                value=img_path if has_image else None,
+                                label="Starting Image",
+                                height=150
+                            )
+                        with gr.Column(scale=1):
+                            load_btn = gr.Button(f"Load Example {i+1}", size="lg")
+                            load_btn.click(
+                                fn=lambda p=prompt, img=img_path: load_i2v_example_with_resolution(p, img) + (
+                                    gr.update(value=False),
+                                    gr.update(value=True),
+                                    gr.update(selected="generate")
+                                ),
+                                outputs=[
+                                    video_text_prompt,
+                                    image,
+                                    aspect_ratio,
+                                    video_width,
+                                    video_height,
+                                    image_to_use,
+                                    enable_multiline_prompts,
+                                    enable_video_extension,
+                                    main_tabs
+                                ],
+                                js="() => window.scrollTo({ top: 0, behavior: 'smooth' })"
                             )
 
     # Hook up aspect ratio change
