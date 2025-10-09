@@ -4555,8 +4555,8 @@ Check the console output for detailed error information and verify your input fi
 theme = gr.themes.Soft()
 theme.font = ["Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v8.1 : https://www.patreon.com/posts/140393220")
-    print("Ovi Pro SECourses Premium App v8.1")
+    gr.Markdown("# Ovi Pro SECourses Premium App v8.2 : https://www.patreon.com/posts/140393220")
+    print("Ovi Pro SECourses Premium App v8.2")
     image_to_use = gr.State(value=None)
     input_video_state = gr.State(value=None)  # Store input video path for merging
     original_image_path = gr.State(value=None)  # Store original uploaded image path (never changes until new upload)
@@ -5575,7 +5575,7 @@ with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
                             load_btn = gr.Button(f"Load Example {i+1}", size="lg")
                             load_btn.click(
                                 fn=lambda prompt=example: (
-                                    prompt,
+                                    prompt.replace("\\n", "\n"),
                                     None,
                                     None,
                                     gr.update(value=False),
@@ -5609,7 +5609,7 @@ with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
                         with gr.Column(scale=1):
                             load_btn = gr.Button(f"Load Example {i+1}", size="lg")
                             load_btn.click(
-                                fn=lambda p=prompt, img=img_path: load_i2v_example_with_resolution(p, img) + (
+                                fn=lambda p=prompt, img=img_path: load_i2v_example_with_resolution(p.replace("\\n", "\n"), img) + (
                                     gr.update(value=False),
                                     gr.update(value=True),
                                     gr.update(value=4),
