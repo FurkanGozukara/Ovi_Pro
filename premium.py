@@ -4618,8 +4618,14 @@ with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
                                 )
                             with gr.Column(scale=2, min_width=1):
                                 with gr.Row():
-                                    video_width = gr.Number(minimum=128, maximum=1920, value=992, step=32, label="Video Width")
-                                    video_height = gr.Number(minimum=128, maximum=1920, value=512, step=32, label="Video Height")
+                                    video_width = gr.Number(maximum=1920, value=992, step=32, label="Video Width",
+                                        # NO minimum constraint - allows free typing without validation errors
+                                        # Validation happens in the update functions instead
+                                        info="Video width in pixels (higher values use more VRAM)")
+                                    video_height = gr.Number(maximum=1920, value=512, step=32, label="Video Height",
+                                        # NO minimum constraint - allows free typing without validation errors
+                                        # Validation happens in the update functions instead
+                                        info="Video height in pixels (higher values use more VRAM)")
                             with gr.Column(scale=1, min_width=1):
                                 auto_crop_image = gr.Checkbox(
                                     value=True,
