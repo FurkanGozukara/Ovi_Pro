@@ -4285,7 +4285,7 @@ def update_image_crop_and_labels(image_path, auto_crop_image, video_width, video
             image_path
         )
 
-def on_media_upload(media_path, auto_crop_image, video_width, video_height):
+def on_media_upload(media_path, auto_crop_image, video_width, video_height, base_resolution_width=720, base_resolution_height=720):
     """Called when user uploads media (image or video) - processes and updates UI.
     
     Returns: (input_preview, cropped_display, image_resolution_label, aspect_ratio, 
@@ -4390,8 +4390,10 @@ def on_media_upload(media_path, auto_crop_image, video_width, video_height):
             w, h = map(float, ratio_str.split(':'))
             return w / h
         
-        closest_key = min(ASPECT_RATIOS.keys(), key=lambda k: abs(get_ratio_value(k) - aspect))
-        target_w, target_h = ASPECT_RATIOS[closest_key]
+        # Get aspect ratios based on the user's BASE resolution settings
+        base_aspect_ratios = get_common_aspect_ratios(base_resolution_width, base_resolution_height)
+        closest_key = min(base_aspect_ratios.keys(), key=lambda k: abs(get_ratio_value(k) - aspect))
+        target_w, target_h = base_aspect_ratios[closest_key]
         
         print(f"[AUTO-DETECT] {'Video frame' if is_video else 'Image'} {original_width}×{original_height} (aspect {aspect:.3f}) → Closest ratio: {closest_key} → {target_w}×{target_h}")
         
@@ -4420,9 +4422,9 @@ def on_media_upload(media_path, auto_crop_image, video_width, video_height):
         
         output_res_label = f"**Cropped {'Frame' if is_video else 'Image'} Resolution:** {target_w}×{target_h}px"
         
-        # Format aspect ratio for dropdown
-        aspect_display = _format_ratio_choice(closest_key, ASPECT_RATIOS[closest_key])
-        aspect_choices = [_format_ratio_choice(name, dims) for name, dims in get_common_aspect_ratios(target_w, target_h).items()]
+        # Format aspect ratio for dropdown - use BASE resolution to generate choices (base_aspect_ratios already calculated above)
+        aspect_display = _format_ratio_choice(closest_key, base_aspect_ratios[closest_key])
+        aspect_choices = [_format_ratio_choice(name, dims) for name, dims in base_aspect_ratios.items()]
         if aspect_display not in aspect_choices:
             aspect_choices = [aspect_display] + aspect_choices
         
@@ -4476,9 +4478,9 @@ def on_media_upload(media_path, auto_crop_image, video_width, video_height):
             None   # original_image_height
         )
 
-def on_image_upload(image_path, auto_crop_image, video_width, video_height):
+def on_image_upload(image_path, auto_crop_image, video_width, video_height, base_resolution_width=720, base_resolution_height=720):
     """Legacy function - redirects to on_media_upload for compatibility."""
-    result = on_media_upload(image_path, auto_crop_image, video_width, video_height)
+    result = on_media_upload(image_path, auto_crop_image, video_width, video_height, base_resolution_width, base_resolution_height)
     # Return all values except the last one (input_video_state) for backward compatibility
     return result[:-1]
 
@@ -4553,8 +4555,8 @@ Check the console output for detailed error information and verify your input fi
 theme = gr.themes.Soft()
 theme.font = ["Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v8.0 : https://www.patreon.com/posts/140393220")
-    print("Ovi Pro SECourses Premium App v8.0")
+    gr.Markdown("# Ovi Pro SECourses Premium App v8.1 : https://www.patreon.com/posts/140393220")
+    print("Ovi Pro SECourses Premium App v8.1")
     image_to_use = gr.State(value=None)
     input_video_state = gr.State(value=None)  # Store input video path for merging
     original_image_path = gr.State(value=None)  # Store original uploaded image path (never changes until new upload)
@@ -5761,7 +5763,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
 
     image.change(
         fn=on_media_upload,
-        inputs=[image, auto_crop_image, video_width, video_height],
+        inputs=[image, auto_crop_image, video_width, video_height, base_resolution_width, base_resolution_height],
         outputs=[input_preview, cropped_display, image_resolution_label, aspect_ratio, video_width, video_height, 
                 cropped_resolution_label, image_to_use, input_video_state, 
                 original_image_path, original_image_width, original_image_height]
@@ -5769,7 +5771,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
 
     auto_crop_image.change(
         fn=on_media_upload,
-        inputs=[image, auto_crop_image, video_width, video_height],
+        inputs=[image, auto_crop_image, video_width, video_height, base_resolution_width, base_resolution_height],
         outputs=[input_preview, cropped_display, image_resolution_label, aspect_ratio, video_width, video_height, 
                 cropped_resolution_label, image_to_use, input_video_state,
                 original_image_path, original_image_width, original_image_height]
