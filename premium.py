@@ -3899,6 +3899,7 @@ def load_i2v_example_with_resolution(prompt, img_path):
         print(f"Error loading I2V example: {e}")
         return (prompt, img_path, gr.update(), gr.update(), gr.update(), img_path)
 
+
 def pad_image_to_resolution(image, target_width, target_height):
     """Intelligently downscale and pad image to target resolution maintaining aspect ratio.
     
@@ -4560,8 +4561,8 @@ with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
     original_image_width = gr.State(value=None)  # Store original image width
     original_image_height = gr.State(value=None)  # Store original image height
 
-    with gr.Tabs():
-        with gr.TabItem("Generate"):
+    with gr.Tabs(selected="generate") as main_tabs:
+        with gr.TabItem("Generate", id="generate"):
             with gr.Row():
                 with gr.Column():
                     # Image/Video section - now accepts both
@@ -5028,7 +5029,7 @@ with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
                         with gr.Row():
                             refresh_loras_btn = gr.Button("🔄 Refresh LoRA List", size="sm", variant="secondary")
 
-        with gr.TabItem("How to Use"):
+        with gr.TabItem("How to Use", id="how_to_use"):
             with gr.Row():
                 with gr.Column():
                     gr.Markdown(
@@ -5434,7 +5435,7 @@ with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
                         """
                     )
 
-        with gr.TabItem("Examples"):
+        with gr.TabItem("Examples", id="examples"):
             gr.Markdown("## 🎬 Example Prompts")
             gr.Markdown("Click on any example below to load it into the generation interface. Text-to-Video examples don't require an image, while Image-to-Video examples will load both prompt and image.")
 
@@ -5493,14 +5494,14 @@ with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
                             gr.Textbox(
                                 value=example,
                                 label=f"T2V Example {i+1}",
-                                lines=5,
+                                lines=6,
                                 interactive=False
                             )
                         with gr.Column(scale=1):
-                            load_btn = gr.Button(f"Load Example {i+1}", size="sm")
+                            load_btn = gr.Button(f"Load Example {i+1}", size="lg")
                             load_btn.click(
-                                fn=lambda prompt=example: (prompt, None, None),
-                                outputs=[video_text_prompt, image, image_to_use]
+                                fn=lambda prompt=example: (prompt, None, None, gr.update(selected="generate")),
+                                outputs=[video_text_prompt, image, image_to_use, main_tabs]
                             )
 
             with gr.TabItem("Image-to-Video Examples"):
@@ -5513,7 +5514,7 @@ with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
                             gr.Textbox(
                                 value=prompt,
                                 label=f"I2V Example {i+1}",
-                                lines=5,
+                                lines=6,
                                 interactive=False
                             )
                             if img_path and os.path.exists(img_path):
@@ -5521,10 +5522,10 @@ with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
                             else:
                                 gr.Markdown("*Image not found*")
                         with gr.Column(scale=1):
-                            load_btn = gr.Button(f"Load Example {i+1}", size="sm")
+                            load_btn = gr.Button(f"Load Example {i+1}", size="lg")
                             load_btn.click(
-                                fn=lambda p=prompt, img=img_path: load_i2v_example_with_resolution(p, img),
-                                outputs=[video_text_prompt, image, aspect_ratio, video_width, video_height, image_to_use]
+                                fn=lambda p=prompt, img=img_path: load_i2v_example_with_resolution(p, img) + (gr.update(selected="generate"),),
+                                outputs=[video_text_prompt, image, aspect_ratio, video_width, video_height, image_to_use, main_tabs]
                             )
 
     # Hook up aspect ratio change
