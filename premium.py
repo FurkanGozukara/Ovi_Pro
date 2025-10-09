@@ -3438,6 +3438,81 @@ def process_batch_generation(
             img_status = "with image" if img_path else "text-only"
             print(f"  - {base_name}: {img_status}")
 
+        # PRE-PROCESSING VALIDATION: Check all prompt files before starting processing
+        print(f"\n[VALIDATION] Checking all prompt files before starting processing...")
+        invalid_files = []
+        valid_files = []
+
+        for base_name, image_path, txt_path in batch_items:
+            try:
+                # Read prompt from txt file
+                with open(txt_path, 'r', encoding='utf-8') as f:
+                    raw_text_prompt = f.read().strip()
+
+                if not raw_text_prompt:
+                    print(f"  ❌ {base_name}: Empty prompt file")
+                    invalid_files.append((base_name, txt_path, "Empty prompt file"))
+                    continue
+
+                # Validate prompt format (unless disabled)
+                if not disable_auto_prompt_validation:
+                    is_valid, error_message = validate_prompt_format(raw_text_prompt)
+                    if not is_valid:
+                        print(f"  ❌ {base_name}: Invalid prompt format - {error_message.split('.')[0]}")
+                        invalid_files.append((base_name, txt_path, f"Invalid prompt format: {error_message}"))
+                        continue
+                else:
+                    print(f"  ⚠️  {base_name}: Skipping validation (disabled)")
+
+                # Parse multi-line prompts if enabled
+                individual_prompts = parse_multiline_prompts(raw_text_prompt, enable_multiline_prompts)
+
+                # Validate each individual prompt line if multi-line is enabled (unless disabled)
+                if enable_multiline_prompts and not disable_auto_prompt_validation:
+                    invalid_lines = []
+                    for i, prompt_line in enumerate(individual_prompts):
+                        line_valid, line_error = validate_prompt_format(prompt_line)
+                        if not line_valid:
+                            invalid_lines.append(f"line {i+1}: {line_error}")
+
+                    if invalid_lines:
+                        print(f"  ❌ {base_name}: Invalid prompt in {len(invalid_lines)} line(s)")
+                        for line_error in invalid_lines[:3]:  # Show first 3 errors
+                            print(f"     {line_error}")
+                        if len(invalid_lines) > 3:
+                            print(f"     ... and {len(invalid_lines) - 3} more errors")
+                        invalid_files.append((base_name, txt_path, f"Invalid prompts in {len(invalid_lines)} lines"))
+                        continue
+
+                # File passed all validations
+                print(f"  ✅ {base_name}: Valid")
+                valid_files.append((base_name, image_path, txt_path))
+
+            except Exception as e:
+                print(f"  ❌ {base_name}: File error - {str(e)}")
+                invalid_files.append((base_name, txt_path, f"File error: {str(e)}"))
+
+        # Report validation results
+        print(f"\n[VALIDATION RESULTS]")
+        print(f"  Valid files: {len(valid_files)}")
+        print(f"  Invalid files: {len(invalid_files)}")
+
+        if invalid_files:
+            print(f"\n[INVALID FILES]")
+            for base_name, txt_path, error in invalid_files:
+                print(f"  ❌ {base_name} ({os.path.basename(txt_path)}): {error}")
+
+            if disable_auto_prompt_validation:
+                print(f"\n[WARNING] Auto prompt validation is DISABLED - invalid files will be processed anyway")
+            else:
+                error_msg = f"Found {len(invalid_files)} invalid prompt file(s). Please fix the errors and try again."
+                raise Exception(error_msg)
+
+        print(f"\n[PROCESSING] Starting batch generation with {len(valid_files)} valid files...")
+
+        # Replace batch_items with only valid files
+        batch_items = valid_files
+
         # CRITICAL: Always use exact user-specified Video Width and Video Height from Gradio interface
         # For batch processing with auto-crop enabled, dimensions will be detected from each image
         print(f"[BATCH RESOLUTION] Using exact user-specified resolution: {video_frame_width}x{video_frame_height}")
@@ -3505,43 +3580,17 @@ def process_batch_generation(
         skipped_count = 0
         last_output_path = None
 
-        # Process each batch item
+        # Process each batch item (all items have been pre-validated)
         for base_name, image_path, txt_path in batch_items:
             # Check for cancellation
             check_cancellation()
 
-            # Read prompt from txt file
-            try:
-                with open(txt_path, 'r', encoding='utf-8') as f:
-                    raw_text_prompt = f.read().strip()
-                if not raw_text_prompt:
-                    print(f"[WARNING] Empty prompt file, skipping: {txt_path}")
-                    continue
-            except Exception as e:
-                print(f"[ERROR] Failed to read prompt file {txt_path}: {e}")
-                continue
-            
-            # Validate prompt format (unless disabled)
-            if not disable_auto_prompt_validation:
-                is_valid, error_message = validate_prompt_format(raw_text_prompt)
-                if not is_valid:
-                    print(f"[ERROR] Invalid prompt format in {txt_path}:")
-                    print(error_message)
-                    print(f"[SKIPPING] {base_name} due to invalid prompt format")
-                    continue
+            # Read prompt from txt file (already validated, so should not fail)
+            with open(txt_path, 'r', encoding='utf-8') as f:
+                raw_text_prompt = f.read().strip()
 
             # Parse multi-line prompts if enabled
             individual_prompts = parse_multiline_prompts(raw_text_prompt, enable_multiline_prompts)
-            
-            # Validate each individual prompt line if multi-line is enabled (unless disabled)
-            if enable_multiline_prompts and not disable_auto_prompt_validation:
-                for i, prompt_line in enumerate(individual_prompts):
-                    line_valid, line_error = validate_prompt_format(prompt_line)
-                    if not line_valid:
-                        print(f"[ERROR] Invalid prompt format in {txt_path}, line {i+1}:")
-                        print(line_error)
-                        print(f"[SKIPPING] {base_name} due to invalid prompt in line {i+1}")
-                        continue
 
             print(f"\n[PROCESSING] {base_name}")
             if enable_multiline_prompts:
@@ -4432,11 +4481,79 @@ def on_image_upload(image_path, auto_crop_image, video_width, video_height):
     # Return all values except the last one (input_video_state) for backward compatibility
     return result[:-1]
 
+def generate_video_with_error_handling(*args, **kwargs):
+    """Wrapper for generate_video that catches validation errors and displays them in UI."""
+    try:
+        result = generate_video(*args, **kwargs)
+        # Success: return the video path and hide error message
+        return result, gr.update(value="", visible=False)
+    except ValueError as e:
+        error_msg = str(e)
+        # Check if this is a prompt validation error
+        if "Invalid prompt format" in error_msg:
+            # Format the error message for display
+            import html
+            formatted_error = html.escape(error_msg.replace("Invalid prompt format:\n\n", ""))
+            formatted_error = formatted_error.replace('\n\n', '\n\n').replace('\n', '  \n')
+
+            display_error = f"""### ❌ Prompt Syntax Error
+
+**Your prompt has syntax errors and cannot be processed:**
+
+{formatted_error}
+
+**Required format:**
+- **Speech tags (REQUIRED):** `<S>Your dialogue here<E>` - At least one pair required
+- **Audio captions (OPTIONAL):** `<AUDCAP>Audio description<ENDAUDCAP>` - Must be paired if used
+
+**Example:**
+```
+A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice, friendly tone<ENDAUDCAP>
+```
+
+Please fix the prompt format and try again."""
+            return gr.update(value=None), gr.update(value=display_error, visible=True)
+        else:
+            # Other ValueError, show as generic error
+            display_error = f"### ❌ Generation Error\n\n{error_msg}"
+            return gr.update(value=None), gr.update(value=display_error, visible=True)
+    except Exception as e:
+        # Other exceptions
+        display_error = f"### ❌ Unexpected Error\n\n{str(e)}"
+        return gr.update(value=None), gr.update(value=display_error, visible=True)
+
+def process_batch_generation_with_error_handling(*args, **kwargs):
+    """Wrapper for process_batch_generation that catches validation errors and displays them in UI."""
+    try:
+        print("[BATCH] Starting batch processing with error handling...")
+        result = process_batch_generation(*args, **kwargs)
+        # Success: return the result and hide error message
+        print("[BATCH] Batch processing completed successfully")
+        return result, gr.update(value="", visible=False)
+    except Exception as e:
+        error_msg = str(e)
+        print(f"[BATCH] Batch processing failed with error: {error_msg}")
+        # For batch processing, show the error that occurred
+        display_error = f"""### ❌ Batch Processing Error
+
+**An error occurred during batch processing:**
+
+{error_msg}
+
+**Common issues:**
+- Invalid prompt format in one or more files
+- Missing or corrupted input files
+- Insufficient disk space or permissions
+
+Check the console output for detailed error information and verify your input files."""
+        print(f"[BATCH] Returning error to UI: {display_error[:100]}...")
+        return gr.update(value=None), gr.update(value=display_error, visible=True)
+
 theme = gr.themes.Soft()
 theme.font = ["Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v7.5 : https://www.patreon.com/posts/140393220")
-    print("Ovi Pro SECourses Premium App v7.5")
+    gr.Markdown("# Ovi Pro SECourses Premium App v7.6 : https://www.patreon.com/posts/140393220")
+    print("Ovi Pro SECourses Premium App v7.6")
     image_to_use = gr.State(value=None)
     input_video_state = gr.State(value=None)  # Store input video path for merging
     original_image_path = gr.State(value=None)  # Store original uploaded image path (never changes until new upload)
@@ -4488,7 +4605,6 @@ with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
                                 value=False,
                                 info="Intelligently downscale and pad images (maintains aspect ratio) instead of crop+resize"
                             )
-                            prompt_validation_output = gr.Markdown("", visible=False)
 
                         # Aspect ratio and resolution in reorganized layout
                         with gr.Row():
@@ -4718,6 +4834,8 @@ with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
 
                 with gr.Column():
                     output_path = gr.Video(label="Generated Video")
+                    # Error message display for validation and generation errors
+                    error_message_display = gr.Markdown("", visible=False)
                     with gr.Row():
                         open_outputs_btn = gr.Button("📁 Open Outputs Folder")
                         cancel_btn = gr.Button("❌ Cancel All", variant="stop")
@@ -5441,17 +5559,18 @@ with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
     def handle_prompt_validation(prompt):
         """Validate prompt format and return user-friendly message."""
         is_valid, error_message = validate_prompt_format(prompt)
-        
+
         if is_valid:
             success_msg = """### ✅ Prompt Format Valid
 
 **Your prompt is ready to use!**
 
 - Contains required speech tags
-- All tags are properly paired  
+- All tags are properly paired
 - No unknown tags detected
 """
-            return gr.update(value=success_msg, visible=True)
+            # Return (keep video output unchanged, show success message)
+            return gr.update(), gr.update(value=success_msg, visible=True)
         else:
             # Convert plain text error message to HTML with proper formatting
             import html
@@ -5459,7 +5578,7 @@ with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
             formatted_error = html.escape(error_message)
             # Then replace newlines with HTML breaks for display
             formatted_error = formatted_error.replace('\n\n', '\n\n').replace('\n', '  \n')
-            
+
             error_display = f"""### ❌ Prompt Format Invalid
 
 **What's wrong:**
@@ -5478,12 +5597,13 @@ with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
 A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice, friendly tone<ENDAUDCAP>
 ```
 """
-            return gr.update(value=error_display, visible=True)
+            # Return (keep video output unchanged, show error message)
+            return gr.update(), gr.update(value=error_display, visible=True)
     
     validate_prompt_btn.click(
         fn=handle_prompt_validation,
         inputs=[video_text_prompt],
-        outputs=[prompt_validation_output]
+        outputs=[output_path, error_message_display]
     )
 
     # Hook up randomize seed
@@ -5512,7 +5632,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
     )
     
     run_btn.click(
-        fn=generate_video,
+        fn=generate_video_with_error_handling,
         inputs=[
             video_text_prompt, image_to_use, video_height, video_width, video_seed, solver_name,
             sample_steps, shift, video_guidance_scale, audio_guidance_scale,
@@ -5529,7 +5649,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
             lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,  # LoRA parameters
         ],
-        outputs=[output_path],
+        outputs=[output_path, error_message_display],
     )
 
     image.change(
@@ -5585,7 +5705,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
 
     # Hook up batch processing button (batch processing handles its own image paths from folder)
     batch_btn.click(
-        fn=process_batch_generation,
+        fn=process_batch_generation_with_error_handling,
         inputs=[
             batch_input_folder, batch_output_folder, batch_skip_existing,
             video_height, video_width, solver_name, sample_steps, shift,
@@ -5600,7 +5720,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
             lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,
         ],
-        outputs=[output_path],
+        outputs=[output_path, error_message_display],
     )
 
     # Hook up preset management
