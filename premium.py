@@ -4563,8 +4563,8 @@ Check the console output for detailed error information and verify your input fi
 theme = gr.themes.Soft()
 theme.font = ["Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v8.2 : https://www.patreon.com/posts/140393220")
-    print("Ovi Pro SECourses Premium App v8.2")
+    gr.Markdown("# Ovi Pro SECourses Premium App v8.3 : https://www.patreon.com/posts/140393220")
+    print("Ovi Pro SECourses Premium App v8.3")
     image_to_use = gr.State(value=None)
     input_video_state = gr.State(value=None)  # Store input video path for merging
     original_image_path = gr.State(value=None)  # Store original uploaded image path (never changes until new upload)
