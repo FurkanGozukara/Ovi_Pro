@@ -22,7 +22,7 @@ from ovi.utils.processing_utils import clean_text, preprocess_image_tensor, snap
 DEFAULT_CONFIG = OmegaConf.load('ovi/configs/inference/inference_fusion.yaml')
 
 class OviFusionEngine:
-    def __init__(self, config=DEFAULT_CONFIG, device=0, target_dtype=torch.bfloat16, blocks_to_swap=0, cpu_offload=None, video_latent_length=None, audio_latent_length=None):
+    def __init__(self, config=DEFAULT_CONFIG, device=0, target_dtype=torch.bfloat16, blocks_to_swap=0, cpu_offload=None, video_latent_length=None, audio_latent_length=None, merge_loras_on_gpu=False):
         # Store config and defer model loading
         self.device = device if isinstance(device, torch.device) else torch.device(f"cuda:{device}" if isinstance(device, int) else device)
         self.target_dtype = target_dtype
@@ -51,6 +51,7 @@ class OviFusionEngine:
         self.audio_latent_length = audio_latent_length if audio_latent_length is not None else 157
         self.video_latent_length = video_latent_length if video_latent_length is not None else 31
         self._vae_device = None
+        self.merge_loras_on_gpu = merge_loras_on_gpu
         
         # T5 configuration (set during first generation)
         self.fp8_t5 = False
@@ -300,7 +301,7 @@ class OviFusionEngine:
         if self.cpu_offload:
             self._offload_vaes_to_cpu()
 
-    def _apply_loras_to_model(self, model, lora_specs):
+    def _apply_loras_to_model(self, model, lora_specs, merge_loras_on_gpu=False):
         """
         Apply LoRAs to the fusion model after loading
         This happens AFTER model is fully loaded but BEFORE any generation/block swapping
@@ -308,6 +309,7 @@ class OviFusionEngine:
         Args:
             model: Loaded fusion model
             lora_specs: List of (lora_path, scale, layers) tuples
+            merge_loras_on_gpu: Whether to merge LoRAs on GPU instead of CPU
         """
         if not lora_specs:
             return
@@ -334,6 +336,10 @@ class OviFusionEngine:
                 video_loras.append((lora_path, scale))
                 audio_loras.append((lora_path, scale))
 
+        # Determine merge device based on user preference
+        merge_device = 'cuda' if merge_loras_on_gpu else 'cpu'
+        print(f"[LORA MERGING] Using device: {merge_device} (merge_loras_on_gpu={merge_loras_on_gpu})")
+
         # Merge LoRAs into video model
         stats_video = {'matched_layers': 0, 'total_loras': 0}
         if model.video_model is not None and video_loras:
@@ -342,7 +348,7 @@ class OviFusionEngine:
                 model.video_model,
                 video_loras,
                 model_dtype=self.target_dtype,
-                device='cpu'  # Merge on CPU for memory efficiency
+                device=merge_device
             )
             print(f"[VIDEO MODEL] ✓ Merged {stats_video['matched_layers']} layers from {stats_video['total_loras']} LoRAs")
 
@@ -354,7 +360,7 @@ class OviFusionEngine:
                 model.audio_model,
                 audio_loras,
                 model_dtype=self.target_dtype,
-                device='cpu'  # Merge on CPU for memory efficiency
+                device=merge_device
             )
             print(f"[AUDIO MODEL] ✓ Merged {stats_audio['matched_layers']} layers from {stats_audio['total_loras']} LoRAs")
 
@@ -457,8 +463,9 @@ class OviFusionEngine:
         # Step 3: Apply LoRAs BEFORE dtype conversion and FP8 optimization!
         # LoRAs should be merged into bf16 model, then converted to FP8 if needed
         if self.lora_specs:
-            print("Step 3a/7: Applying LoRAs to model on CPU (before dtype conversion)...")
-            self._apply_loras_to_model(model, self.lora_specs)
+            device_name = "GPU" if self.merge_loras_on_gpu else "CPU"
+            print(f"Step 3a/7: Applying LoRAs to model on {device_name} (before dtype conversion)...")
+            self._apply_loras_to_model(model, self.lora_specs, self.merge_loras_on_gpu)
         
         # Step 3b: Apply FP8 optimization AFTER LoRA merge!
         # This ensures FP8 checkpoint includes LoRA-merged weights

@@ -1071,6 +1071,7 @@ def generate_video(
     disable_auto_prompt_validation=False,  # New: Skip automatic prompt validation when True
     auto_pad_32px_divisible=False,  # New: Auto pad for 32px divisibility instead of crop+resize
     input_video_path=None,  # New: Input video path for merging (when user uploads video)
+    merge_loras_on_gpu=False,  # New: Merge LoRAs on GPU instead of CPU for high VRAM GPUs
     lora_1=None, lora_1_scale=1.0, lora_1_layers="Video Layers",  # LoRA 1 selection, scale, and layers
     lora_2=None, lora_2_scale=1.0, lora_2_layers="Video Layers",  # LoRA 2 selection, scale, and layers
     lora_3=None, lora_3_scale=1.0, lora_3_layers="Video Layers",  # LoRA 3 selection, scale, and layers
@@ -1333,7 +1334,8 @@ def generate_video(
                 blocks_to_swap=final_blocks_to_swap,
                 cpu_offload=final_cpu_offload,
                 video_latent_length=video_latent_length,
-                audio_latent_length=audio_latent_length
+                audio_latent_length=audio_latent_length,
+                merge_loras_on_gpu=merge_loras_on_gpu
             )
             ovi_engine_duration = duration_seconds  # Store duration used for initialization
             print("\n[OK] OviFusionEngine initialized successfully (models will load on first generation)")
@@ -1516,6 +1518,7 @@ def generate_video(
                         'disable_auto_prompt_validation': disable_auto_prompt_validation,  # Pass through validation setting
                         'force_exact_resolution': True,  # CRITICAL: Always use exact resolution in subprocess
                         'lora_specs': lora_specs,  # Pass LoRA specs for model loading
+                        'merge_loras_on_gpu': merge_loras_on_gpu,  # Pass LoRA GPU merging setting
                     }
                     
                     # Debug: Log LoRA specs being passed to subprocess
@@ -2781,7 +2784,7 @@ def save_preset(preset_name, current_preset,
                 vae_tiled_decode, vae_tile_size, vae_tile_overlap,
                 base_resolution_width, base_resolution_height, duration_seconds,
                 enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input, disable_auto_prompt_validation,
-                auto_pad_32px_divisible,
+                auto_pad_32px_divisible, merge_loras_on_gpu,
                 lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
                 lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers):
     """Save current UI state as a preset."""
@@ -2841,6 +2844,7 @@ def save_preset(preset_name, current_preset,
             "dont_auto_combine_video_input": dont_auto_combine_video_input,
             "disable_auto_prompt_validation": disable_auto_prompt_validation,
             "auto_pad_32px_divisible": auto_pad_32px_divisible,
+            "merge_loras_on_gpu": merge_loras_on_gpu,
             "lora_1": lora_1,
             "lora_1_scale": lora_1_scale,
             "lora_1_layers": lora_1_layers,
@@ -2874,20 +2878,20 @@ def save_preset(preset_name, current_preset,
 
     except Exception as e:
         presets = get_available_presets()
-        return gr.update(choices=presets, value=None), gr.update(value=""), *[gr.update() for _ in range(51)], f"Error saving preset: {e}"
+        return gr.update(choices=presets, value=None), gr.update(value=""), *[gr.update() for _ in range(52)], f"Error saving preset: {e}"
 
 def load_preset(preset_name):
     """Load a preset and return all UI values with robust error handling."""
     try:
         if not preset_name:
-            return [gr.update() for _ in range(51)] + ["No preset selected"]
+            return [gr.update() for _ in range(52)] + ["No preset selected"]
 
         # Use the robust loading system
         preset_data, error_msg = load_preset_safely(preset_name)
 
         if preset_data is None:
             # Loading failed, return error state
-            return [gr.update() for _ in range(51)] + [error_msg]
+            return [gr.update() for _ in range(52)] + [error_msg]
 
         # Save as last used for auto-load (only if loading succeeded)
         try:
@@ -2987,6 +2991,7 @@ def load_preset(preset_name):
             gr.update(value=preset_data.get("dont_auto_combine_video_input", False)),
             gr.update(value=preset_data.get("disable_auto_prompt_validation", False)),
             gr.update(value=preset_data.get("auto_pad_32px_divisible", False)),
+            gr.update(value=preset_data.get("merge_loras_on_gpu", False)),
             gr.update(value=preset_data.get("lora_1", "None")),
             gr.update(value=preset_data.get("lora_1_scale", 1.0)),
             gr.update(value=preset_data.get("lora_1_layers", "Video Layers")),
@@ -3006,7 +3011,7 @@ def load_preset(preset_name):
     except Exception as e:
         error_msg = f"Unexpected error loading preset: {e}"
         print(f"[PRESET] {error_msg}")
-        return [gr.update() for _ in range(51)] + [error_msg]
+        return [gr.update() for _ in range(52)] + [error_msg]
 
 def initialize_app_with_auto_load():
     """Initialize app with preset dropdown choices and auto-load last preset or VRAM-based preset."""
@@ -3400,6 +3405,7 @@ def process_batch_generation(
     dont_auto_combine_video_input,  # New: Don't auto combine video input
     disable_auto_prompt_validation,  # New: Skip automatic prompt validation when True
     auto_pad_32px_divisible,  # New: Auto pad for 32px divisibility
+    merge_loras_on_gpu,  # New: Merge LoRAs on GPU instead of CPU
     lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
     lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,
 ):
@@ -3571,7 +3577,8 @@ def process_batch_generation(
                 blocks_to_swap=final_blocks_to_swap,
                 cpu_offload=final_cpu_offload,
                 video_latent_length=video_latent_length,
-                audio_latent_length=audio_latent_length
+                audio_latent_length=audio_latent_length,
+                merge_loras_on_gpu=merge_loras_on_gpu
             )
             ovi_engine_duration = duration_seconds  # Store duration used for initialization
             print("\n[OK] OviFusionEngine initialized successfully for batch processing")
@@ -3820,6 +3827,7 @@ def process_batch_generation(
                             enable_video_extension=enable_video_extension,  # Pass through video extension setting
                             dont_auto_combine_video_input=dont_auto_combine_video_input,  # Pass through setting
                             auto_pad_32px_divisible=auto_pad_32px_divisible,  # Pass through padding setting
+                            merge_loras_on_gpu=merge_loras_on_gpu,  # Pass through LoRA GPU merging setting
                             lora_1=lora_1, lora_1_scale=lora_1_scale, lora_1_layers=lora_1_layers,
                             lora_2=lora_2, lora_2_scale=lora_2_scale, lora_2_layers=lora_2_layers,
                             lora_3=lora_3, lora_3_scale=lora_3_scale, lora_3_layers=lora_3_layers,
@@ -4927,7 +4935,14 @@ with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
                         
                         # Get initial LoRA choices
                         lora_choices, global_lora_path_map = scan_lora_folders()
-                        
+
+                        # LoRA GPU merging option
+                        merge_loras_on_gpu = gr.Checkbox(
+                            label="Merge LoRAs on GPU",
+                            value=False,
+                            info="Merge LoRAs on GPU instead of CPU (useful for high VRAM GPUs, may be faster but uses more VRAM)"
+                        )
+
                         with gr.Row():
                             with gr.Column(scale=3, min_width=1):
                                 lora_1 = gr.Dropdown(
@@ -5755,6 +5770,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input, disable_auto_prompt_validation,
             auto_pad_32px_divisible,
             input_video_state,  # Pass input video path for merging
+            merge_loras_on_gpu,  # Pass LoRA GPU merging setting
             lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
             lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,  # LoRA parameters
         ],
@@ -5825,7 +5841,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds, auto_crop_image,
             enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input, disable_auto_prompt_validation,
-            auto_pad_32px_divisible,
+            auto_pad_32px_divisible, merge_loras_on_gpu,
             lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
             lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,
         ],
@@ -5847,7 +5863,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds,
             enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input, disable_auto_prompt_validation,
-            auto_pad_32px_divisible,
+            auto_pad_32px_divisible, merge_loras_on_gpu,
             lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
             lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,
         ],
@@ -5863,7 +5879,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds,
             enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input, disable_auto_prompt_validation,
-            auto_pad_32px_divisible,
+            auto_pad_32px_divisible, merge_loras_on_gpu,
             lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
             lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,
             gr.Textbox(visible=False)  # status message
@@ -5884,7 +5900,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds,
             enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input, disable_auto_prompt_validation,
-            auto_pad_32px_divisible,
+            auto_pad_32px_divisible, merge_loras_on_gpu,
             lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
             lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,
             preset_dropdown, gr.Textbox(visible=False)  # current preset, status message
@@ -5906,7 +5922,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
             base_resolution_width, base_resolution_height, duration_seconds,
             enable_multiline_prompts, enable_video_extension, dont_auto_combine_video_input, disable_auto_prompt_validation,
-            auto_pad_32px_divisible,
+            auto_pad_32px_divisible, merge_loras_on_gpu,
             lora_1, lora_1_scale, lora_1_layers, lora_2, lora_2_scale, lora_2_layers,
             lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,
             preset_dropdown, gr.Textbox(visible=False)  # current preset, status message
