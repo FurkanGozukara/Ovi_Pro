@@ -2536,6 +2536,7 @@ PRESET_DEFAULTS = {
     "dont_auto_combine_video_input": False,
     "disable_auto_prompt_validation": False,
     "auto_pad_32px_divisible": False,
+    "merge_loras_on_gpu": False,
     "lora_1": "None",
     "lora_1_scale": 1.0,
     "lora_1_layers": "Video Layers",
@@ -4886,7 +4887,7 @@ with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
                         with gr.Row():
                             save_preset_btn = gr.Button("💾 Save Preset", variant="secondary")
                             load_preset_btn = gr.Button("📂 Load Preset", variant="secondary")
-                            refresh_presets_btn = gr.Button("🔄 Refresh List", size="sm")
+                            refresh_presets_btn = gr.Button("🔄 Refresh List", size="sm", visible=False)
 
                     # Batch Processing Section
                     with gr.Accordion("🔄 Batch Processing", open=True):

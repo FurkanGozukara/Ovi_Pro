@@ -28,7 +28,7 @@
   "batch_input_folder": "",
   "batch_output_folder": "",
   "batch_skip_existing": true,
-  "clear_all": false,
+  "clear_all": true,
   "vae_tiled_decode": false,
   "vae_tile_size": 28,
   "vae_tile_overlap": 8,
@@ -39,6 +39,8 @@
   "enable_video_extension": false,
   "dont_auto_combine_video_input": false,
   "disable_auto_prompt_validation": false,
+  "auto_pad_32px_divisible": false,
+  "merge_loras_on_gpu": true,
   "lora_1": "None",
   "lora_1_scale": 1,
   "lora_1_layers": "Video Layers",
@@ -51,5 +53,5 @@
   "lora_4": "None",
   "lora_4_scale": 1,
   "lora_4_layers": "Video Layers",
-  "saved_at": "2025-10-08T15:59:37.197979"
+  "saved_at": "2025-10-15T21:28:49.539342"
 }
