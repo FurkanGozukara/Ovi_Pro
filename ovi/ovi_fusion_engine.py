@@ -451,14 +451,22 @@ class OviFusionEngine:
         print("Step 1/6: Creating model structure on meta device...")
         model, video_config, audio_config = init_fusion_score_model_ovi(rank=device_idx, meta_init=meta_init)
         
-        # Step 2: Load checkpoint weights to CPU (no VRAM usage)
+        # Step 2: Load checkpoint weights to CPU
         checkpoint_path = os.path.join(self.config.ckpt_dir, "Ovi", "model.safetensors")
         if not os.path.exists(checkpoint_path):
             raise RuntimeError(f"No fusion checkpoint found in {self.config.ckpt_dir}")
-        
+
         print("Step 2/6: Loading checkpoint weights to CPU...")
         load_fusion_checkpoint(model, checkpoint_path=checkpoint_path, from_meta=meta_init)
         model.set_rope_params()
+
+        # Step 2.5: If merging LoRAs on GPU, move model to GPU BEFORE LoRA merging to avoid transfers
+        if self.merge_loras_on_gpu and self.lora_specs:
+            print("Step 2.5/6: Moving model to GPU for LoRA merging (avoiding transfer overhead)...")
+            model = model.to(device=self.device, dtype=self.target_dtype).eval()
+            if torch.cuda.is_available():
+                after_move_vram = torch.cuda.memory_allocated(self.device) / 1e9
+                print(f"VRAM after moving model for LoRA merging: {after_move_vram:.2f} GB")
         
         # Step 3: Apply LoRAs BEFORE dtype conversion and FP8 optimization!
         # LoRAs should be merged into bf16 model, then converted to FP8 if needed
@@ -558,8 +566,12 @@ class OviFusionEngine:
         else:
             # No FP8: convert to target dtype normally
             step_num = "3b" if self.lora_specs else "3"
-            print(f"Step {step_num}/6: Converting model to {self.target_dtype} on CPU...")
-            model = model.to(device="cpu", dtype=self.target_dtype).eval()
+            # Skip conversion if model is already on GPU and in correct dtype (happens with merge_loras_on_gpu)
+            if self.merge_loras_on_gpu and str(model.device) != "cpu":
+                print(f"Step {step_num}/6: Model already on GPU with correct dtype (skipping conversion)...")
+            else:
+                print(f"Step {step_num}/6: Converting model to {self.target_dtype} on CPU...")
+                model = model.to(device="cpu", dtype=self.target_dtype).eval()
         
         if torch.cuda.is_available():
             after_load_vram = torch.cuda.memory_allocated(self.device) / 1e9
@@ -610,15 +622,19 @@ class OviFusionEngine:
                 print("Step 6/6: Block swap preparation skipped (no_block_prep=True)")
         else:
             # No block swap - load entire model to device normally
-            print("Step 4/6: No block swap - moving entire model to device...")
             target_device = self.device if not self.cpu_offload else "cpu"
-            
-            # Use FP8-preserving move if FP8 optimization is enabled
-            if self.fp8_base_model and target_device != "cpu":
-                from ovi.utils.fp8_fusion_optimization_utils import move_fusion_model_to_device_preserve_fp8
-                model = move_fusion_model_to_device_preserve_fp8(model, target_device)
+
+            # Skip moving if model is already on target device (happens with merge_loras_on_gpu)
+            if self.merge_loras_on_gpu and str(model.device) == str(target_device):
+                print(f"Step 4/6: Model already on {target_device} (skipping device move)...")
             else:
-                model = model.to(device=target_device)
+                print(f"Step 4/6: Moving entire model to {target_device}...")
+                # Use FP8-preserving move if FP8 optimization is enabled
+                if self.fp8_base_model and target_device != "cpu":
+                    from ovi.utils.fp8_fusion_optimization_utils import move_fusion_model_to_device_preserve_fp8
+                    model = move_fusion_model_to_device_preserve_fp8(model, target_device)
+                else:
+                    model = model.to(device=target_device)
             
             if torch.cuda.is_available():
                 after_load_vram = torch.cuda.memory_allocated(self.device) / 1e9
