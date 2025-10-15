@@ -567,7 +567,8 @@ class OviFusionEngine:
             # No FP8: convert to target dtype normally
             step_num = "3b" if self.lora_specs else "3"
             # Skip conversion if model is already on GPU and in correct dtype (happens with merge_loras_on_gpu)
-            if self.merge_loras_on_gpu and str(model.device) != "cpu":
+            current_device = next(model.parameters()).device
+            if self.merge_loras_on_gpu and str(current_device) != "cpu":
                 print(f"Step {step_num}/6: Model already on GPU with correct dtype (skipping conversion)...")
             else:
                 print(f"Step {step_num}/6: Converting model to {self.target_dtype} on CPU...")
@@ -625,7 +626,8 @@ class OviFusionEngine:
             target_device = self.device if not self.cpu_offload else "cpu"
 
             # Skip moving if model is already on target device (happens with merge_loras_on_gpu)
-            if self.merge_loras_on_gpu and str(model.device) == str(target_device):
+            current_device = next(model.parameters()).device
+            if self.merge_loras_on_gpu and str(current_device) == str(target_device):
                 print(f"Step 4/6: Model already on {target_device} (skipping device move)...")
             else:
                 print(f"Step 4/6: Moving entire model to {target_device}...")
