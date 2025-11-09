@@ -40,7 +40,16 @@ class OviFusionEngine:
         self.config = config
         self.blocks_to_swap = blocks_to_swap
         self.optimized_block_swap = optimized_block_swap
-        self.use_pinned_memory_for_block_swap = optimized_block_swap
+        if optimized_block_swap:
+            env_override = os.getenv("OVI_FORCE_PINNED_BLOCK_SWAP")
+            if env_override is not None:
+                self.use_pinned_memory_for_block_swap = env_override == "1"
+            else:
+                import platform
+
+                self.use_pinned_memory_for_block_swap = platform.system() != "Windows"
+        else:
+            self.use_pinned_memory_for_block_swap = False
         
         # Auto-enable CPU offload when block swap is used (optimal memory management)
         if blocks_to_swap > 0 and cpu_offload is None:
@@ -101,6 +110,10 @@ class OviFusionEngine:
         logging.info(f"  Device: {self.device}")
         logging.info(f"  Block Swap: {self.blocks_to_swap} blocks")
         logging.info(f"  Optimized Block Swap: {self.optimized_block_swap}")
+        if self.optimized_block_swap:
+            logging.info(f"  Pinned-memory transfers: {self.use_pinned_memory_for_block_swap}")
+            if not self.use_pinned_memory_for_block_swap:
+                logging.info("  (Pinned memory disabled on this platform; optimized path will fall back to legacy swapping.)")
         logging.info(f"  CPU Offload: {self.cpu_offload}")
         if self.blocks_to_swap > 0:
             logging.info(f"  Block swap will keep {self.blocks_to_swap} transformer blocks on CPU, loading only active blocks to GPU during inference")

@@ -740,6 +740,10 @@ class ModelOffloader:
         debug: bool = False,
     ):
         object.__setattr__(self, "optimized", optimized)
+        optimized_requested = optimized
+        if optimized_requested and not use_pinned_memory:
+            optimized = False
+
         if optimized:
             impl = _OptimizedModelOffloader(
                 block_type,
@@ -761,6 +765,9 @@ class ModelOffloader:
                 device,
                 debug=debug,
             )
+
+        if optimized_requested and not optimized and debug:
+            print(f"[{block_type}] Optimized block swap requested but disabled (requires pinned memory). Falling back to legacy offloading.")
         object.__setattr__(self, "_impl", impl)
 
     def __getattr__(self, name):
