@@ -670,6 +670,7 @@ class WanModel(ModelMixin, ConfigMixin):
         # offloading
         self.blocks_to_swap = None
         self.offloader = None
+        self.optimized_block_swap = False
 
     def set_rope_params(self):
         # buffers (don't use register_buffer otherwise dtype will be changed in to())
@@ -694,16 +695,32 @@ class WanModel(ModelMixin, ConfigMixin):
     def set_gradient_checkpointing(self, enable: bool):
         self.gradient_checkpointing = enable
 
-    def enable_block_swap(self, blocks_to_swap: int, device: torch.device, supports_backward: bool):
+    def enable_block_swap(
+        self,
+        blocks_to_swap: int,
+        device: torch.device,
+        supports_backward: bool,
+        *,
+        optimized_block_swap: bool = False,
+        use_pinned_memory: bool = False,
+    ):
         self.blocks_to_swap = blocks_to_swap
         self.num_blocks = len(self.blocks)
+        self.optimized_block_swap = optimized_block_swap
 
         assert (
             self.blocks_to_swap <= self.num_blocks - 1
         ), f"Cannot swap more than {self.num_blocks - 1} blocks. Requested {self.blocks_to_swap} blocks to swap."
 
         self.offloader = ModelOffloader(
-            "wan_attn_block", self.blocks, self.num_blocks, self.blocks_to_swap, supports_backward, device
+            "wan_attn_block",
+            self.blocks,
+            self.num_blocks,
+            self.blocks_to_swap,
+            supports_backward,
+            device,
+            optimized=optimized_block_swap,
+            use_pinned_memory=use_pinned_memory,
         )
         print(
             f"WanModel: Block swap enabled. Swapping {self.blocks_to_swap} blocks out of {self.num_blocks} blocks. Supports backward: {supports_backward}"

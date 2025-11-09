@@ -93,6 +93,11 @@ parser.add_argument(
     default=0,
     help="Number of transformer blocks to swap to CPU memory during generation (0 = disabled)"
 )
+parser.add_argument(
+    "--optimized_block_swap",
+    action="store_true",
+    help="Enable optimized block swap pipeline (musubi-style experimental offloading)"
+)
 # Add test arguments for automatic testing
 parser.add_argument(
     "--test",
@@ -152,6 +157,7 @@ print(f"[DEBUG] Parsed args: single_generation={bool(args.single_generation)}, s
 # Initialize engines with lazy loading (no models loaded yet)
 ovi_engine = None  # Will be initialized on first generation
 ovi_engine_duration = None  # Track duration used to initialize engine
+ovi_engine_optimized_block_swap = None  # Track optimized block swap flag used to initialize engine
 
 # Global cancellation flag for stopping generations
 cancel_generation = False
@@ -1039,6 +1045,7 @@ def generate_video(
     audio_guidance_scale,
     slg_layer,
     blocks_to_swap,
+    optimized_block_swap,
     video_negative_prompt,
     audio_negative_prompt,
     use_image_gen,
@@ -1188,7 +1195,7 @@ def generate_video(
         # Count valid prompt lines (>= 3 chars after trim) minus 1 for the main video
         video_extension_count = max(0, len(validation_prompts) - 1)
 
-    global ovi_engine
+    global ovi_engine, ovi_engine_duration, ovi_engine_optimized_block_swap
 
     # Reset cancellation flag at the start of each generation request
     reset_cancellation()
@@ -1298,23 +1305,40 @@ def generate_video(
             print("  VRAM/RAM will be completely cleared between generations")
             print("=" * 80)
 
-        # Check if duration has changed - if so, force engine reinitialization
-        global ovi_engine, ovi_engine_duration
-        if not clear_all and ovi_engine is not None and ovi_engine_duration != duration_seconds:
-            print("=" * 80)
-            print(f"DURATION CHANGED: {ovi_engine_duration}s → {duration_seconds}s")
-            print("  Forcing engine reinitialization with new latent lengths")
-            print("=" * 80)
-            ovi_engine = None  # Force reinitialization
+        # Check if duration / block swap mode changed - if so, force engine reinitialization
+        global ovi_engine, ovi_engine_duration, ovi_engine_optimized_block_swap
+        current_engine_mode = ovi_engine_optimized_block_swap
+        if ovi_engine is not None and current_engine_mode is None:
+            current_engine_mode = getattr(ovi_engine, "optimized_block_swap", False)
+            ovi_engine_optimized_block_swap = current_engine_mode
+
+        if not clear_all and ovi_engine is not None:
+            reinit_messages = []
+            if ovi_engine_duration != duration_seconds:
+                reinit_messages.append(f"DURATION CHANGED: {ovi_engine_duration}s → {duration_seconds}s")
+            if current_engine_mode != optimized_block_swap:
+                prev_label = "Optimized" if current_engine_mode else "Legacy"
+                new_label = "Optimized" if optimized_block_swap else "Legacy"
+                reinit_messages.append(f"BLOCK SWAP MODE CHANGED: {prev_label} → {new_label}")
+
+            if reinit_messages:
+                print("=" * 80)
+                for msg in reinit_messages:
+                    print(msg)
+                print("  Forcing engine reinitialization with updated settings")
+                print("=" * 80)
+                ovi_engine = None  # Force reinitialization
 
         if not clear_all and ovi_engine is None:
             # Use CLI args only in test mode, otherwise use GUI parameters
             if getattr(args, 'test', False):
                 final_blocks_to_swap = getattr(args, 'blocks_to_swap', 0)
                 final_cpu_offload = getattr(args, 'test_cpu_offload', False)
+                final_optimized_block_swap = getattr(args, 'optimized_block_swap', False)
             else:
                 final_blocks_to_swap = blocks_to_swap
                 final_cpu_offload = None if (not cpu_offload and not use_image_gen) else (cpu_offload or use_image_gen)
+                final_optimized_block_swap = optimized_block_swap
 
             print("=" * 80)
             print("INITIALIZING OVI FUSION ENGINE IN MAIN PROCESS")
@@ -1322,6 +1346,7 @@ def generate_video(
             print(f"  CPU Offload: {final_cpu_offload}")
             print(f"  Image Generation: {use_image_gen}")
             print(f"  No Block Prep: {no_block_prep}")
+            print(f"  Optimized Block Swap: {final_optimized_block_swap}")
             print(f"  Note: Models will be loaded in main process (Clear All Memory disabled)")
             print("=" * 80)
 
@@ -1335,9 +1360,11 @@ def generate_video(
                 cpu_offload=final_cpu_offload,
                 video_latent_length=video_latent_length,
                 audio_latent_length=audio_latent_length,
-                merge_loras_on_gpu=merge_loras_on_gpu
+                merge_loras_on_gpu=merge_loras_on_gpu,
+                optimized_block_swap=final_optimized_block_swap
             )
             ovi_engine_duration = duration_seconds  # Store duration used for initialization
+            ovi_engine_optimized_block_swap = final_optimized_block_swap
             print("\n[OK] OviFusionEngine initialized successfully (models will load on first generation)")
 
         image_path = None
@@ -1487,6 +1514,7 @@ def generate_video(
                         'audio_guidance_scale': audio_guidance_scale,
                         'slg_layer': slg_layer,
                         'blocks_to_swap': blocks_to_swap,
+            'optimized_block_swap': optimized_block_swap,
                         'video_negative_prompt': video_negative_prompt,
                         'audio_negative_prompt': audio_negative_prompt,
                         'use_image_gen': False,  # Not used in single gen mode
@@ -1664,7 +1692,7 @@ def generate_video(
                             metadata_prompt, image_path, video_frame_height, video_frame_width,
                             aspect_ratio, base_resolution_width, base_resolution_height, duration_seconds,
                             randomize_seed, num_generations, solver_name, sample_steps, shift,
-                            video_guidance_scale, audio_guidance_scale, slg_layer, blocks_to_swap,
+                            video_guidance_scale, audio_guidance_scale, slg_layer, blocks_to_swap, optimized_block_swap,
                             cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model,
                             use_sage_attention, no_audio, no_block_prep, clear_all, vae_tiled_decode,
                             vae_tile_size, vae_tile_overlap, video_negative_prompt, audio_negative_prompt,
@@ -1871,7 +1899,7 @@ def generate_video(
                                     ext_cleaned_prompt, current_image_path, video_frame_height, video_frame_width,
                                     aspect_ratio, base_resolution_width, base_resolution_height, ext_duration_seconds,
                                     randomize_seed, num_generations, solver_name, sample_steps, shift,
-                                    video_guidance_scale, audio_guidance_scale, slg_layer, None,  # blocks_to_swap=None for extensions
+                                    video_guidance_scale, audio_guidance_scale, slg_layer, None, optimized_block_swap,  # blocks_to_swap=None for extensions
                                     cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model,
                                     use_sage_attention, no_audio, no_block_prep, clear_all, vae_tiled_decode,
                                     vae_tile_size, vae_tile_overlap, video_negative_prompt, audio_negative_prompt,
@@ -2513,6 +2541,7 @@ PRESET_DEFAULTS = {
     "audio_guidance_scale": 3.0,
     "slg_layer": 11,
     "blocks_to_swap": 12,
+    "optimized_block_swap": False,
     "cpu_offload": True,
     "delete_text_encoder": True,
     "fp8_t5": False,
@@ -2563,6 +2592,7 @@ PRESET_VALIDATION = {
     "audio_guidance_scale": {"type": float, "min": 0.0, "max": 10.0},
     "slg_layer": {"type": int, "min": -1, "max": 30},
     "blocks_to_swap": {"type": int, "min": 0, "max": 29},
+    "optimized_block_swap": {"type": bool},
     "vae_tile_size": {"type": int, "min": 12, "max": 64},
     "vae_tile_overlap": {"type": int, "min": 4, "max": 16},
     "base_resolution_width": {"type": int},
@@ -2779,7 +2809,7 @@ def save_preset(preset_name, current_preset,
                 video_seed, randomize_seed, no_audio, save_metadata,
                 solver_name, sample_steps, num_generations,
                 shift, video_guidance_scale, audio_guidance_scale, slg_layer,
-                blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model, use_sage_attention,
+                blocks_to_swap, optimized_block_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model, use_sage_attention,
                 video_negative_prompt, audio_negative_prompt,
                 batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
                 vae_tiled_decode, vae_tile_size, vae_tile_overlap,
@@ -2798,7 +2828,7 @@ def save_preset(preset_name, current_preset,
 
         if not preset_name.strip():
             presets = get_available_presets()
-            return gr.update(choices=presets, value=None), gr.update(value=""), *[gr.update() for _ in range(39)], "Please enter a preset name or select a preset to overwrite"
+            return gr.update(choices=presets, value=None), gr.update(value=""), *[gr.update() for _ in range(40)], "Please enter a preset name or select a preset to overwrite"
 
         preset_file = os.path.join(presets_dir, f"{preset_name}.json")
 
@@ -2822,6 +2852,7 @@ def save_preset(preset_name, current_preset,
             "audio_guidance_scale": audio_guidance_scale,
             "slg_layer": slg_layer,
             "blocks_to_swap": blocks_to_swap,
+            "optimized_block_swap": optimized_block_swap,
             "cpu_offload": cpu_offload,
             "delete_text_encoder": delete_text_encoder,
             "fp8_t5": fp8_t5,
@@ -2879,20 +2910,20 @@ def save_preset(preset_name, current_preset,
 
     except Exception as e:
         presets = get_available_presets()
-        return gr.update(choices=presets, value=None), gr.update(value=""), *[gr.update() for _ in range(52)], f"Error saving preset: {e}"
+        return gr.update(choices=presets, value=None), gr.update(value=""), *[gr.update() for _ in range(53)], f"Error saving preset: {e}"
 
 def load_preset(preset_name):
     """Load a preset and return all UI values with robust error handling."""
     try:
         if not preset_name:
-            return [gr.update() for _ in range(52)] + ["No preset selected"]
+            return [gr.update() for _ in range(53)] + ["No preset selected"]
 
         # Use the robust loading system
         preset_data, error_msg = load_preset_safely(preset_name)
 
         if preset_data is None:
             # Loading failed, return error state
-            return [gr.update() for _ in range(52)] + [error_msg]
+            return [gr.update() for _ in range(53)] + [error_msg]
 
         # Save as last used for auto-load (only if loading succeeded)
         try:
@@ -2969,6 +3000,7 @@ def load_preset(preset_name):
             gr.update(value=preset_data["audio_guidance_scale"]),
             gr.update(value=preset_data["slg_layer"]),
             gr.update(value=preset_data["blocks_to_swap"]),
+            gr.update(value=preset_data.get("optimized_block_swap", False)),
             gr.update(value=preset_data["cpu_offload"]),
             gr.update(value=preset_data["delete_text_encoder"]),
             gr.update(value=preset_data["fp8_t5"]),
@@ -3012,7 +3044,7 @@ def load_preset(preset_name):
     except Exception as e:
         error_msg = f"Unexpected error loading preset: {e}"
         print(f"[PRESET] {error_msg}")
-        return [gr.update() for _ in range(52)] + [error_msg]
+        return [gr.update() for _ in range(53)] + [error_msg]
 
 def initialize_app_with_auto_load():
     """Initialize app with preset dropdown choices and auto-load last preset or VRAM-based preset."""
@@ -3161,6 +3193,7 @@ def initialize_app_with_auto_load():
             gr.update(),  # audio_guidance_scale
             gr.update(),  # slg_layer
             gr.update(),  # blocks_to_swap
+            gr.update(),  # optimized_block_swap
             gr.update(),  # cpu_offload
             delete_text_encoder_update,  # delete_text_encoder (potentially modified)
             fp8_t5_update,  # fp8_t5 (potentially modified)
@@ -3188,7 +3221,7 @@ def initialize_app_with_auto_load():
     except Exception as e:
         print(f"Warning: Could not initialize app with auto-load: {e}")
         presets = get_available_presets()
-        return gr.update(choices=presets, value=None), *[gr.update() for _ in range(38)], ""
+        return gr.update(choices=presets, value=None), *[gr.update() for _ in range(39)], ""
 
 def initialize_app():
     """Initialize app with preset dropdown choices."""
@@ -3198,7 +3231,7 @@ def initialize_app():
 def build_generation_metadata_params(text_prompt, image_path, video_frame_height, video_frame_width,
                                    aspect_ratio, base_resolution_width, base_resolution_height, duration_seconds,
                                    randomize_seed, num_generations, solver_name, sample_steps, shift,
-                                   video_guidance_scale, audio_guidance_scale, slg_layer, blocks_to_swap,
+                                   video_guidance_scale, audio_guidance_scale, slg_layer, blocks_to_swap, optimized_block_swap,
                                    cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model,
                                    use_sage_attention, no_audio, no_block_prep, clear_all, vae_tiled_decode,
                                    vae_tile_size, vae_tile_overlap, video_negative_prompt, audio_negative_prompt,
@@ -3223,6 +3256,7 @@ def build_generation_metadata_params(text_prompt, image_path, video_frame_height
         'audio_guidance_scale': audio_guidance_scale,
         'slg_layer': slg_layer,
         'blocks_to_swap': blocks_to_swap,
+        'optimized_block_swap': optimized_block_swap,
         'cpu_offload': cpu_offload,
         'delete_text_encoder': delete_text_encoder,
         'fp8_t5': fp8_t5,
@@ -3289,6 +3323,7 @@ GENERATION SETTINGS:
 
 MEMORY OPTIMIZATION:
 - Block Swap: {generation_params.get('blocks_to_swap', 'N/A')} blocks
+- Optimized Block Swap: {generation_params.get('optimized_block_swap', False)}
 - CPU Offload: {generation_params.get('cpu_offload', 'N/A')}
 - Delete Text Encoder: {generation_params.get('delete_text_encoder', True)}
 - Scaled FP8 T5: {generation_params.get('fp8_t5', False)}
@@ -3379,6 +3414,7 @@ def process_batch_generation(
     audio_guidance_scale,
     slg_layer,
     blocks_to_swap,
+    optimized_block_swap,
     video_negative_prompt,
     audio_negative_prompt,
     cpu_offload,
@@ -3411,7 +3447,7 @@ def process_batch_generation(
     lora_3, lora_3_scale, lora_3_layers, lora_4, lora_4_scale, lora_4_layers,
 ):
     """Process batch generation from input folder."""
-    global ovi_engine
+    global ovi_engine, ovi_engine_duration, ovi_engine_optimized_block_swap
 
     try:
         # Check for cancellation at the start
@@ -3544,28 +3580,46 @@ def process_batch_generation(
             print("=" * 80)
 
         # Check if duration has changed - if so, force engine reinitialization
-        global ovi_engine, ovi_engine_duration
-        if not clear_all and ovi_engine is not None and ovi_engine_duration != duration_seconds:
-            print("=" * 80)
-            print(f"DURATION CHANGED: {ovi_engine_duration}s → {duration_seconds}s")
-            print("  Forcing engine reinitialization with new latent lengths")
-            print("=" * 80)
-            ovi_engine = None  # Force reinitialization
+        global ovi_engine, ovi_engine_duration, ovi_engine_optimized_block_swap
+        current_engine_mode = ovi_engine_optimized_block_swap
+        if ovi_engine is not None and current_engine_mode is None:
+            current_engine_mode = getattr(ovi_engine, "optimized_block_swap", False)
+            ovi_engine_optimized_block_swap = current_engine_mode
+
+        if not clear_all and ovi_engine is not None:
+            reinit_messages = []
+            if ovi_engine_duration != duration_seconds:
+                reinit_messages.append(f"DURATION CHANGED: {ovi_engine_duration}s → {duration_seconds}s")
+            if current_engine_mode != optimized_block_swap:
+                prev_label = "Optimized" if current_engine_mode else "Legacy"
+                new_label = "Optimized" if optimized_block_swap else "Legacy"
+                reinit_messages.append(f"BLOCK SWAP MODE CHANGED: {prev_label} → {new_label}")
+
+            if reinit_messages:
+                print("=" * 80)
+                for msg in reinit_messages:
+                    print(msg)
+                print("  Forcing engine reinitialization with updated settings")
+                print("=" * 80)
+                ovi_engine = None  # Force reinitialization
 
         if not clear_all and ovi_engine is None:
             # Use CLI args only in test mode, otherwise use GUI parameters
             if getattr(args, 'test', False):
                 final_blocks_to_swap = getattr(args, 'blocks_to_swap', 0)
                 final_cpu_offload = getattr(args, 'test_cpu_offload', False)
+                final_optimized_block_swap = getattr(args, 'optimized_block_swap', False)
             else:
                 final_blocks_to_swap = blocks_to_swap
                 final_cpu_offload = cpu_offload
+                final_optimized_block_swap = optimized_block_swap
 
             print("=" * 80)
             print("INITIALIZING OVI FUSION ENGINE FOR BATCH PROCESSING IN MAIN PROCESS")
             print(f"  Block Swap: {final_blocks_to_swap} blocks (0 = disabled)")
             print(f"  CPU Offload: {final_cpu_offload}")
             print(f"  No Block Prep: {no_block_prep}")
+            print(f"  Optimized Block Swap: {final_optimized_block_swap}")
             print(f"  Note: Models will be loaded in main process (Clear All Memory disabled)")
             print("=" * 80)
 
@@ -3579,9 +3633,11 @@ def process_batch_generation(
                 cpu_offload=final_cpu_offload,
                 video_latent_length=video_latent_length,
                 audio_latent_length=audio_latent_length,
-                merge_loras_on_gpu=merge_loras_on_gpu
+                merge_loras_on_gpu=merge_loras_on_gpu,
+                optimized_block_swap=final_optimized_block_swap
             )
             ovi_engine_duration = duration_seconds  # Store duration used for initialization
+            ovi_engine_optimized_block_swap = final_optimized_block_swap
             print("\n[OK] OviFusionEngine initialized successfully for batch processing")
 
         processed_count = 0
@@ -3727,6 +3783,7 @@ def process_batch_generation(
                         'audio_guidance_scale': audio_guidance_scale,
                         'slg_layer': slg_layer,
                         'blocks_to_swap': blocks_to_swap,
+            'optimized_block_swap': optimized_block_swap,
                         'video_negative_prompt': video_negative_prompt,
                         'audio_negative_prompt': audio_negative_prompt,
                         'use_image_gen': False,
@@ -3798,6 +3855,7 @@ def process_batch_generation(
                             audio_guidance_scale=audio_guidance_scale,
                             slg_layer=slg_layer,
                             blocks_to_swap=blocks_to_swap,
+                            optimized_block_swap=optimized_block_swap,
                             video_negative_prompt=video_negative_prompt,
                             audio_negative_prompt=audio_negative_prompt,
                             use_image_gen=False,
@@ -4767,6 +4825,11 @@ with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
                                 step=1,
                                 label="Block Swap (0 = disabled)",
                                 info="Number of transformer blocks to keep on CPU (saves VRAM)"
+                            )
+                            optimized_block_swap = gr.Checkbox(
+                                label="Optimized Block Swap",
+                                value=False,
+                                info="Use experimental Musubi-style swap pipeline (faster, may use more shared memory)"
                             )
                             cpu_offload = gr.Checkbox(
                                 label="CPU Offload",
@@ -5761,7 +5824,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
         inputs=[
             video_text_prompt, image_to_use, video_height, video_width, video_seed, solver_name,
             sample_steps, shift, video_guidance_scale, audio_guidance_scale,
-            slg_layer, blocks_to_swap, video_negative_prompt, audio_negative_prompt,
+            slg_layer, blocks_to_swap, optimized_block_swap, video_negative_prompt, audio_negative_prompt,
             gr.Checkbox(value=False, visible=False), cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model, use_sage_attention,
             no_audio, gr.Checkbox(value=False, visible=False),
             num_generations, randomize_seed, save_metadata, aspect_ratio, clear_all,
@@ -5835,8 +5898,8 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
         inputs=[
             batch_input_folder, batch_output_folder, batch_skip_existing,
             video_height, video_width, solver_name, sample_steps, shift,
-            video_guidance_scale, audio_guidance_scale, slg_layer, blocks_to_swap,
-            video_negative_prompt, audio_negative_prompt, cpu_offload,
+            video_guidance_scale, audio_guidance_scale, slg_layer, blocks_to_swap, optimized_block_swap,
+            video_negative_prompt, audio_negative_prompt, gr.Checkbox(value=False, visible=False), cpu_offload,
             delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model, use_sage_attention, no_audio, gr.Checkbox(value=False, visible=False),
             num_generations, randomize_seed, save_metadata, aspect_ratio, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
@@ -5858,7 +5921,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             video_seed, randomize_seed, no_audio, save_metadata,
             solver_name, sample_steps, num_generations,
             shift, video_guidance_scale, audio_guidance_scale, slg_layer,
-            blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model, use_sage_attention,
+            blocks_to_swap, optimized_block_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model, use_sage_attention,
             video_negative_prompt, audio_negative_prompt,
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
@@ -5874,7 +5937,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             video_seed, randomize_seed, no_audio, save_metadata,
             solver_name, sample_steps, num_generations,
             shift, video_guidance_scale, audio_guidance_scale, slg_layer,
-            blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model, use_sage_attention,
+            blocks_to_swap, optimized_block_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model, use_sage_attention,
             video_negative_prompt, audio_negative_prompt,
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
@@ -5895,7 +5958,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             video_seed, randomize_seed, no_audio, save_metadata,
             solver_name, sample_steps, num_generations,
             shift, video_guidance_scale, audio_guidance_scale, slg_layer,
-            blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model, use_sage_attention,
+            blocks_to_swap, optimized_block_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model, use_sage_attention,
             video_negative_prompt, audio_negative_prompt,
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
@@ -5917,7 +5980,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             video_seed, randomize_seed, no_audio, save_metadata,
             solver_name, sample_steps, num_generations,
             shift, video_guidance_scale, audio_guidance_scale, slg_layer,
-            blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model, use_sage_attention,
+            blocks_to_swap, optimized_block_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model, use_sage_attention,
             video_negative_prompt, audio_negative_prompt,
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
@@ -5947,7 +6010,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             video_seed, randomize_seed, no_audio, save_metadata,
             solver_name, sample_steps, num_generations,
             shift, video_guidance_scale, audio_guidance_scale, slg_layer,
-            blocks_to_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model, use_sage_attention,
+            blocks_to_swap, optimized_block_swap, cpu_offload, delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model, use_sage_attention,
             video_negative_prompt, audio_negative_prompt,
             batch_input_folder, batch_output_folder, batch_skip_existing, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
@@ -6225,6 +6288,7 @@ if __name__ == "__main__":
             'audio_guidance_scale': 3.0,
             'slg_layer': 11,
             'blocks_to_swap': 0,
+            'optimized_block_swap': False,
             'video_negative_prompt': 'jitter, bad hands, blur, distortion',
             'audio_negative_prompt': 'robotic, muffled, echo, distorted',
             'use_image_gen': False,
@@ -6321,6 +6385,7 @@ if __name__ == "__main__":
             'audio_guidance_scale': 3.0,
             'slg_layer': 11,
             'blocks_to_swap': 12,
+            'optimized_block_swap': False,
             'video_negative_prompt': "jitter, bad hands, blur, distortion",
             'audio_negative_prompt': "robotic, muffled, echo, distorted",
             'use_image_gen': False,
@@ -6350,6 +6415,8 @@ if __name__ == "__main__":
             test_params['text_prompt'] = args.test_prompt
         if hasattr(args, 'blocks_to_swap'):
             test_params['blocks_to_swap'] = args.blocks_to_swap
+        if hasattr(args, 'optimized_block_swap'):
+            test_params['optimized_block_swap'] = args.optimized_block_swap
         if hasattr(args, 'test_cpu_offload'):
             test_params['cpu_offload'] = args.test_cpu_offload
         if hasattr(args, 'test_fp8_t5'):
@@ -6365,6 +6432,7 @@ if __name__ == "__main__":
         print(f"  Prompt: {test_params['text_prompt'][:50]}...")
         print(f"  Sample Steps: {test_params['sample_steps']} (fast test)")
         print(f"  Block Swap: {test_params['blocks_to_swap']}")
+        print(f"  Optimized Block Swap: {test_params['optimized_block_swap']}")
         print(f"  CPU Offload: {test_params['cpu_offload']}")
         print(f"  Delete T5: {test_params['delete_text_encoder']}")
         print(f"  Scaled FP8 T5: {test_params['fp8_t5']}")

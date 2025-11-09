@@ -22,12 +22,25 @@ from ovi.utils.processing_utils import clean_text, preprocess_image_tensor, snap
 DEFAULT_CONFIG = OmegaConf.load('ovi/configs/inference/inference_fusion.yaml')
 
 class OviFusionEngine:
-    def __init__(self, config=DEFAULT_CONFIG, device=0, target_dtype=torch.bfloat16, blocks_to_swap=0, cpu_offload=None, video_latent_length=None, audio_latent_length=None, merge_loras_on_gpu=False):
+    def __init__(
+        self,
+        config=DEFAULT_CONFIG,
+        device=0,
+        target_dtype=torch.bfloat16,
+        blocks_to_swap=0,
+        cpu_offload=None,
+        video_latent_length=None,
+        audio_latent_length=None,
+        merge_loras_on_gpu=False,
+        optimized_block_swap=False,
+    ):
         # Store config and defer model loading
         self.device = device if isinstance(device, torch.device) else torch.device(f"cuda:{device}" if isinstance(device, int) else device)
         self.target_dtype = target_dtype
         self.config = config
         self.blocks_to_swap = blocks_to_swap
+        self.optimized_block_swap = optimized_block_swap
+        self.use_pinned_memory_for_block_swap = optimized_block_swap
         
         # Auto-enable CPU offload when block swap is used (optimal memory management)
         if blocks_to_swap > 0 and cpu_offload is None:
@@ -87,9 +100,12 @@ class OviFusionEngine:
         logging.info(f"OVI Fusion Engine initialized with lazy loading.")
         logging.info(f"  Device: {self.device}")
         logging.info(f"  Block Swap: {self.blocks_to_swap} blocks")
+        logging.info(f"  Optimized Block Swap: {self.optimized_block_swap}")
         logging.info(f"  CPU Offload: {self.cpu_offload}")
         if self.blocks_to_swap > 0:
             logging.info(f"  Block swap will keep {self.blocks_to_swap} transformer blocks on CPU, loading only active blocks to GPU during inference")
+        if self.optimized_block_swap:
+            logging.info("  Optimized block swap enabled (pinned memory + async swap events)")
 
     def _encode_text_and_cleanup(self, text_prompt, video_negative_prompt, audio_negative_prompt, delete_text_encoder=True, use_subprocess=True):
         """
@@ -584,8 +600,20 @@ class OviFusionEngine:
             print(f"  Video model: {len(model.video_model.blocks)} blocks total")
             print(f"  Audio model: {len(model.audio_model.blocks)} blocks total")
             
-            model.video_model.enable_block_swap(self.blocks_to_swap, self.device, supports_backward=False)
-            model.audio_model.enable_block_swap(self.blocks_to_swap, self.device, supports_backward=False)
+            model.video_model.enable_block_swap(
+                self.blocks_to_swap,
+                self.device,
+                supports_backward=False,
+                optimized_block_swap=self.optimized_block_swap,
+                use_pinned_memory=self.use_pinned_memory_for_block_swap,
+            )
+            model.audio_model.enable_block_swap(
+                self.blocks_to_swap,
+                self.device,
+                supports_backward=False,
+                optimized_block_swap=self.optimized_block_swap,
+                use_pinned_memory=self.use_pinned_memory_for_block_swap,
+            )
             
             # Step 5: Move to device EXCEPT swap blocks (saves VRAM!)
             print("Step 5/6: Moving model to GPU except swap blocks (optimal VRAM usage)...")
