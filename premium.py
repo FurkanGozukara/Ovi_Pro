@@ -1776,6 +1776,7 @@ def generate_video(
                                     'audio_guidance_scale': audio_guidance_scale,
                                     'slg_layer': slg_layer,
                                     'blocks_to_swap': blocks_to_swap,
+                                    'optimized_block_swap': optimized_block_swap,
                                     'video_negative_prompt': video_negative_prompt,
                                     'audio_negative_prompt': audio_negative_prompt,
                                     'use_image_gen': False,
@@ -4622,8 +4623,8 @@ Check the console output for detailed error information and verify your input fi
 theme = gr.themes.Soft()
 theme.font = ["Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v8.4 : https://www.patreon.com/posts/140393220")
-    print("Ovi Pro SECourses Premium App v8.4")
+    gr.Markdown("# Ovi Pro SECourses Premium App v8.5 : https://www.patreon.com/posts/140393220")
+    print("Ovi Pro SECourses Premium App v8.5")
     image_to_use = gr.State(value=None)
     input_video_state = gr.State(value=None)  # Store input video path for merging
     original_image_path = gr.State(value=None)  # Store original uploaded image path (never changes until new upload)
