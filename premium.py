@@ -4623,8 +4623,8 @@ Check the console output for detailed error information and verify your input fi
 theme = gr.themes.Soft()
 theme.font = ["Tahoma", "ui-sans-serif", "system-ui", "sans-serif"]
 with gr.Blocks(theme=theme, title="Ovi Pro Premium SECourses") as demo:
-    gr.Markdown("# Ovi Pro SECourses Premium App v8.5 : https://www.patreon.com/posts/140393220")
-    print("Ovi Pro SECourses Premium App v8.5")
+    gr.Markdown("# Ovi Pro SECourses Premium App v8.6 : https://www.patreon.com/posts/140393220")
+    print("Ovi Pro SECourses Premium App v8.6")
     image_to_use = gr.State(value=None)
     input_video_state = gr.State(value=None)  # Store input video path for merging
     original_image_path = gr.State(value=None)  # Store original uploaded image path (never changes until new upload)
@@ -5900,7 +5900,7 @@ A person says <S>Hello, how are you?<E> while smiling. <AUDCAP>Clear male voice,
             batch_input_folder, batch_output_folder, batch_skip_existing,
             video_height, video_width, solver_name, sample_steps, shift,
             video_guidance_scale, audio_guidance_scale, slg_layer, blocks_to_swap, optimized_block_swap,
-            video_negative_prompt, audio_negative_prompt, gr.Checkbox(value=False, visible=False), cpu_offload,
+            video_negative_prompt, audio_negative_prompt, cpu_offload,
             delete_text_encoder, fp8_t5, cpu_only_t5, fp8_base_model, use_sage_attention, no_audio, gr.Checkbox(value=False, visible=False),
             num_generations, randomize_seed, save_metadata, aspect_ratio, clear_all,
             vae_tiled_decode, vae_tile_size, vae_tile_overlap,
